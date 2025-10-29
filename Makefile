@@ -95,15 +95,7 @@ dev-install: build-install
 # Installation
 install: build
 	@echo "Installing Protocol Bridge as systemd service..."
-	@sudo mkdir -p /etc/protocol-bridge
-	@sudo mkdir -p /etc/protocol-bridge/certs
-	@sudo mkdir -p /var/log/protocol-bridge
-	@sudo cp bridge /usr/local/bin/protocol-bridge
-	@sudo chmod 755 /usr/local/bin/protocol-bridge
-	@sudo cp config.yaml /etc/protocol-bridge/
-	@sudo chmod 600 /etc/protocol-bridge/config.yaml
-	@sudo cp -r certs/* /etc/protocol-bridge/certs/
-	@sudo chmod 600 /etc/protocol-bridge/certs/**/*
+	@sudo mkdir -p /etc/systemd/system
 	@sudo cp deploy/systemd/protocol-bridge.service /etc/systemd/system/
 	@sudo systemctl daemon-reload
 	@echo "✅ Installation complete!"
@@ -112,6 +104,9 @@ install: build
 	@echo "  sudo systemctl enable protocol-bridge"
 	@echo "  sudo systemctl start protocol-bridge"
 	@echo "  sudo systemctl status protocol-bridge"
+	@echo ""
+	@echo "To stop the manual instance first:"
+	@echo "  pkill -f './bridge'"
 
 uninstall:
 	@echo "Uninstalling Protocol Bridge..."
