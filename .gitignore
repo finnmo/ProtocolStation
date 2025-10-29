@@ -1,0 +1,41 @@
+# Build artifacts
+bridge
+
+# Log files
+bridge.log
+logs/
+*.log
+test-*.log
+modbus_registers.json
+
+# Test files
+test-*.sh
+demo.sh
+config.yaml
+encrypt-value
+
+# Go
+*.test
+*.exe
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Certificates - never commit certificates
+certs/**/*.crt
+certs/**/*.key
+certs/**/*.pem
+!certs/**/*.gitkeep
+!certs/**/README.md
+
+# Mosquitto data
+mqtt/server/mosquitto_data/
+mqtt/server/mosquitto_logs/
+mqtt/server/passwd

@@ -1,0 +1,47 @@
+[Unit]
+Description=Protocol Bridge - IoT Message Protocol Bridge
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bridge
+Group=bridge
+WorkingDirectory=/etc/protocol-bridge
+ExecStart=/usr/local/bin/bridge -config /etc/protocol-bridge/config.yaml
+Restart=always
+RestartSec=5
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/etc/protocol-bridge
+PrivateDevices=true
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# Logging - Use file with rotation instead of journal
+StandardOutput=append:/var/log/protocol-bridge/bridge.log
+StandardError=append:/var/log/protocol-bridge/bridge.log
+SyslogIdentifier=protocol-bridge
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Health monitoring
+ExecStartPost=/bin/sh -c 'sleep 2; systemctl --no-block notify READY=1'
+
+# Graceful shutdown
+TimeoutStopSec=30
+KillMode=mixed
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target
+
+

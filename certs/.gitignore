@@ -1,0 +1,21 @@
+# Certificate files - DO NOT COMMIT
+*.crt
+*.key
+*.pem
+!AmazonRootCA1.pem.example
+
+# Keep directory structure but not certs
+!.gitkeep
+!README.md
+
+# Input certificates
+input/**/*.crt
+input/**/*.key
+input/**/*.pem
+!input/*/.gitkeep
+
+# Output certificates
+output/**/*.crt
+output/**/*.key
+output/**/*.pem
+!output/*/.gitkeep

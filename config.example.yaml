@@ -1,0 +1,141 @@
+# Protocol Bridge Configuration Example
+
+# Hosted servers managed by the bridge
+servers:
+  - name: local-mqtt
+    type: mqtt
+    enabled: true
+    broker: localhost:1883
+    # The bridge will automatically:
+    # 1. Check if MQTT server is already running on localhost:1883
+    # 2. If not running, start it using docker-compose in mqtt/server/
+    # 3. Monitor and maintain the server lifecycle
+    # 4. Stop the server when the bridge shuts down
+  - name: local-modbus
+    type: modbus
+    enabled: true
+    address: ":502"
+    persistence_file: "modbus_registers.json"
+
+# Input sources
+inputs:
+  - name: sensor-input
+    type: mqtt
+    broker: localhost:1883
+    client_id: bridge-input-1
+    topics:
+      - sensors/temperature
+      - sensors/humidity
+    qos: 1
+    username: ""
+    password: ""
+  - name: water-aws-input
+    type: mqtt
+    broker: tls://agi8wtqgu97at-ats.iot.ap-southeast-2.amazonaws.com:8883
+    client_id: protocol-bridge-water
+    topics:
+      - pfd/ot/water
+    qos: 1
+    username: ""
+    password: ""
+    cert_path: certs/input/aws-iot-ap-southeast-2/certificate.pem.crt
+    key_path: certs/input/aws-iot-ap-southeast-2/private.pem.key
+    ca_path: certs/input/aws-iot-ap-southeast-2/ca.pem
+
+# Transformation pipelines (1 input -> many outputs)
+pipelines:
+  - name: sensor-pipeline
+    input: sensor-input
+    routes:
+      - transformer: temperature-transform
+        outputs:
+          - temp-output
+      - transformer: humidity-transform
+        outputs:
+          - humidity-output
+          - backup-output
+  - name: water-modbus-pipeline
+    input: water-aws-input
+    routes:
+      - transformer: water-pass-through
+        outputs:
+          - water-modbus-output
+
+# Transformers with JavaScript support
+transformers:
+  - name: temperature-transform
+    type: javascript
+    script: |
+      function transform(input) {
+        return {
+          device_id: input.device,
+          value: parseFloat(input.temp),
+          unit: "celsius",
+          timestamp: new Date().toISOString()
+        };
+      }
+  - name: humidity-transform
+    type: javascript
+    script: |
+      function transform(input) {
+        return {
+          sensor: input.device,
+          humidity_pct: input.humidity,
+          recorded_at: Date.now()
+        };
+      }
+  - name: water-pass-through
+    type: javascript
+    script: |
+      function transform(input) { return input; }
+
+# Output destinations
+outputs:
+  - name: temp-output
+    type: mqtt
+    broker: localhost:1883
+    client_id: bridge-output-temp
+    topic: processed/temperature
+    qos: 1
+    retain: false
+    username: ""
+    password: ""
+  - name: humidity-output
+    type: mqtt
+    broker: localhost:1883
+    client_id: bridge-output-humidity
+    topic: processed/humidity
+    qos: 1
+  - name: backup-output
+    type: mqtt
+    broker: localhost:1883
+    topic: backup/all
+  - name: water-modbus-output
+    type: modbus
+    server: local-modbus
+
+# Error handling configuration
+error_handling:
+  retry:
+    enabled: true
+    max_attempts: 3
+    initial_interval: 1s
+    max_interval: 30s
+    multiplier: 2.0
+  dead_letter_queue:
+    enabled: true
+    type: mqtt
+    broker: localhost:1883
+    topic: dlq/failed-messages
+    max_size: 100    # Maximum DLQ size in MB before refusing new messages
+    alert_size: 50   # Alert when DLQ reaches this size in MB
+
+# Logging with rotation support
+logging:
+  level: info
+  format: json
+  file: logs/bridge.log
+  max_size: 100      # Max log file size in MB
+  max_age: 7         # Max age of log files in days
+  max_backups: 5     # Maximum number of log files to keep
+  compress: true     # Compress old log files
