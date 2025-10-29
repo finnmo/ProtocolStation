@@ -4,7 +4,8 @@ After=network.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=all
 User=optech
 Group=optech
 WorkingDirectory=/home/optech/ProtocolBridge
@@ -21,12 +22,12 @@ StandardOutput=append:/home/optech/ProtocolBridge/logs/bridge.log
 StandardError=append:/home/optech/ProtocolBridge/logs/bridge.log
 SyslogIdentifier=protocol-bridge
 
+# Environment (for Docker access)
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
 # Resource limits
 LimitNOFILE=65536
 LimitNPROC=4096
-
-# Health monitoring
-ExecStartPost=/bin/sh -c 'sleep 2; systemctl --no-block notify READY=1'
 
 # Graceful shutdown
 TimeoutStopSec=30
