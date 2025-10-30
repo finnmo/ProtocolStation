@@ -31,7 +31,8 @@ func NewModbusOutput(name string, serverCtx *modbus.ServerContext, logger *zap.L
 // Start initializes the output
 func (m *ModbusOutput) Start(ctx context.Context) error {
 	m.logger.Info("Modbus output started",
-		zap.String("name", m.name))
+		zap.String("name", m.name),
+		zap.String("address", m.serverCtx.Address()))
 	return nil
 }
 
@@ -89,23 +90,33 @@ func (m *ModbusOutput) Send(ctx context.Context, msg *message.Message) error {
 		return nil // Return nil to indicate successful "drop" and avoid retries
 	}
 
-	// Parse register number (e.g., "403021" -> 3021)
-	registerNum, err := strconv.Atoi(modbusRegisterStr[1:]) // Skip first character '4'
+	// Compute server register offset to match legacy behavior:
+	// offset = serverRegister - 400001. Example: 403021 -> 3020
+	// Accept both string like "403021" and numeric-like strings.
+	serverReg, err := strconv.Atoi(modbusRegisterStr)
 	if err != nil {
 		return fmt.Errorf("invalid modbus register number: %s", modbusRegisterStr)
+	}
+	registerNum := serverReg - 400001
+	if registerNum < 0 {
+		m.logger.Debug("computed negative register offset, dropping message",
+			zap.String("deviceID", payload.Message.Header.DeviceID),
+			zap.Int("unitID", unitID),
+			zap.Int("serverRegister", serverReg))
+		return nil
 	}
 
 	// Get liters value
 	liters := payload.Message.Body.TransformedPayload.Liters
 
 	// Update the Modbus server's holding register
-	// The register number is already the offset (e.g., 3021)
 	m.serverCtx.UpdateRegister(unitID, registerNum, liters)
 
 	m.logger.Info("Updated Modbus register from message",
 		zap.String("deviceID", payload.Message.Header.DeviceID),
 		zap.Int("unitID", unitID),
-		zap.Int("register", registerNum),
+		zap.Int("register_offset", registerNum),
+		zap.Int("server_register", serverReg),
 		zap.Int32("liters", liters))
 
 	return nil

@@ -191,7 +191,9 @@ func (s *TCPServer) handleReadHoldingRegisters(c net.Conn, transactionID uint16,
 	startAddress := binary.BigEndian.Uint16(pdu[1:3])
 	quantity := binary.BigEndian.Uint16(pdu[3:5])
 
-	s.logger.Debug("Read Holding Registers request",
+	s.logger.Info("Modbus poll (FC03)",
+		zap.String("server_address", s.address),
+		zap.String("remote", c.RemoteAddr().String()),
 		zap.Int("unitID", unitID),
 		zap.Uint16("startAddress", startAddress),
 		zap.Uint16("quantity", quantity))

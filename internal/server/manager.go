@@ -355,8 +355,9 @@ func (s *Server) startModbusServer(ctx context.Context) error {
 		persistenceFile = pfile
 	}
 
-	// Create Modbus server context
+	// Create Modbus server context and record listen address for logging
 	s.modbusCtx = modbus.NewServerContext(persistenceFile, s.logger)
+	s.modbusCtx.SetAddress(address)
 
 	// Create and start Modbus TCP server
 	s.modbusTCP = modbus.NewTCPServer(address, s.modbusCtx, s.logger)

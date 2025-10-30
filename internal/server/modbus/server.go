@@ -34,6 +34,7 @@ type ServerContext struct {
 	mu              sync.RWMutex
 	persistenceFile string
 	logger          *zap.Logger
+	address         string
 }
 
 // NewServerContext creates a new Modbus server context
@@ -52,6 +53,20 @@ func NewServerContext(persistenceFile string, logger *zap.Logger) *ServerContext
 	}
 
 	return sc
+}
+
+// SetAddress sets the Modbus server listen address for logging/metadata
+func (sc *ServerContext) SetAddress(addr string) {
+	sc.mu.Lock()
+	sc.address = addr
+	sc.mu.Unlock()
+}
+
+// Address returns the Modbus server listen address
+func (sc *ServerContext) Address() string {
+	sc.mu.RLock()
+	defer sc.mu.RUnlock()
+	return sc.address
 }
 
 // LoadSavedValues loads previously saved register values from disk

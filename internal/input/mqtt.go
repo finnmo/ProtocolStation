@@ -139,11 +139,25 @@ func (m *MQTTInput) IsConnected() bool {
 }
 
 // onConnect handles MQTT connection events
+// CRITICAL ensures subscriptions are restored on reconnect
+
 func (m *MQTTInput) onConnect(client mqtt.Client) {
 	m.mu.Lock()
 	m.connected = true
 	m.mu.Unlock()
 	m.logger.Info("connected to MQTT broker", zap.String("broker", m.config.Broker))
+
+	// Resubscribe to all topics after reconnection
+	// This is critical because MQTT subscriptions are lost on disconnect
+	for _, topic := range m.config.Topics {
+		if token := client.Subscribe(topic, byte(m.config.QoS), m.messageHandler); token.Wait() && token.Error() != nil {
+			m.logger.Error("failed to resubscribe to topic after reconnection",
+				zap.String("topic", topic),
+				zap.Error(token.Error()))
+		} else {
+			m.logger.Info("resubscribed to topic after reconnection", zap.String("topic", topic))
+		}
+	}
 }
 
 // onConnectionLost handles MQTT disconnection events
