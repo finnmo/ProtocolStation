@@ -2,6 +2,8 @@
 
 A Go-based bridge for moving data between protocols (e.g., MQTT → Modbus), with JavaScript-based transforms and simple YAML configuration.
 
+Think of it as a central station: messages arrive from different "lines" (inputs like MQTT), and the station orchestrates their transfers through "platforms" (transformers) onto the correct "departures" (outputs like Modbus or MQTT). You define the routes (pipelines), and the station reliably keeps trains moving—recovering from delays, logging traffic, and ensuring everything gets to the right destination.
+
 ## Highlights
 
 - **MQTT input/output** with auto-reconnect (subscriptions restored on reconnect)
