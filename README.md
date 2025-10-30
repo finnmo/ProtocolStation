@@ -1,59 +1,67 @@
 # Protocol Bridge
 
-A flexible Go-based protocol bridge that enables seamless communication between different IoT protocols with customizable message transformation capabilities.
+A Go-based bridge for moving data between protocols (e.g., MQTT → Modbus), with JavaScript-based transforms and simple YAML configuration.
 
-## Features
+## Highlights
 
-- **MQTT Input/Output**: Connect to MQTT brokers for both consuming and publishing messages
-- **JavaScript Transformers**: Customize message transformation using JavaScript with full JSON support
-- **1-to-Many Routing**: Route messages from one input through multiple transformer+output chains
-- **Retry Mechanism**: Configurable exponential backoff retry for failed operations
-- **Dead Letter Queue**: Automatic handling of failed messages with configurable DLQ
-- **Hosted Server Management**: Automatic lifecycle management of hosted servers (MQTT brokers)
-  - **Auto-Detection**: Checks if MQTT server is already running before starting
-  - **Docker Integration**: Automatically starts/stops MQTT servers using Docker Compose
-  - **Health Monitoring**: Monitors server health and automatically restarts on failure
-- **YAML Configuration**: Easy-to-read configuration format
-- **Structured Logging**: Comprehensive logging with automatic rotation and compression
-- **Long-Running Service**: Runs continuously until stopped (SIGINT/SIGTERM)
-- **Production-Ready Reliability**: Built for years of unattended operation with automatic cleanup and monitoring
+- **MQTT input/output** with auto-reconnect (subscriptions restored on reconnect)
+- **Modbus TCP server** on port 502 by default, 32-bit SINT values stored big‑endian across 2 holding registers
+- **JavaScript transformers** for payload shaping
+- **1→N routing**, retries, DLQ, and hosted server management
+- **Structured logging** with rotation; includes Modbus poll logs (FC03) and startup details
 
 ## Quick Start
 
-### 1. Prerequisites
+### 1) Prerequisites
 
-- Go 1.24 or later
-- Docker and Docker Compose (for MQTT broker)
+- Go 1.24+
+- Docker + Docker Compose (if you want the local MQTT broker started for you)
+- If running Modbus on port 502 under systemd, allow low-port binding (see below)
 
-### 2. Build the Application
+### 2) Build
 
 ```bash
-go build ./cmd/bridge
+make build-install
 ```
 
-### 3. Configure the Bridge
-
-The bridge can automatically manage MQTT servers for you, or you can start them manually.
-
-Copy the example configuration and customize it:
+### 3) Configure
 
 ```bash
 cp config.example.yaml config.yaml
+# edit config.yaml to your environment (MQTT certs, topics, etc.)
 ```
 
-Edit `config.yaml` to match your setup.
+Key defaults that matter:
+- Modbus server listens on `:502`
+- Persistence file: `register_values.json`
+- Legacy Modbus addressing: serverRegister → register offset = serverRegister − 400001
 
-### 4. Run the Bridge
+### 4) Run (Development)
 
 ```bash
 ./bridge -config config.yaml
 ```
 
-The bridge will:
-- **Automatically detect** if MQTT servers are already running
-- **Start MQTT servers** using Docker Compose if they're not running
-- **Run continuously** until you stop it with Ctrl+C
-- **Gracefully shutdown** and stop all managed servers when stopped
+The bridge automatically detects/starts the local MQTT server (if configured), runs until stopped, and shuts down gracefully.
+
+### 5) Install as a Service (systemd)
+
+```bash
+make install
+
+# if binding port 502 under systemd, set capabilities on the binary once:
+sudo setcap 'cap_net_bind_service=+ep' /home/optech/ProtocolBridge/bridge
+
+# allow the capability in the unit (recommended, one-time):
+# In /etc/systemd/system/protocol-bridge.service under [Service]
+#   NoNewPrivileges=false
+#   AmbientCapabilities=CAP_NET_BIND_SERVICE
+#   CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+sudo systemctl daemon-reload
+sudo systemctl enable protocol-bridge
+sudo systemctl start protocol-bridge
+```
 
 ## Hosted Server Management
 
@@ -72,11 +80,10 @@ servers:
 ```
 
 The bridge will:
-
-1. **Check if MQTT server is running** on the specified broker address
-2. **Start the server automatically** using Docker Compose if it's not running
-3. **Monitor server health** and restart if needed
-4. **Stop the server** when the bridge shuts down
+1) Check if the MQTT server is running
+2) Start it with Docker Compose if not
+3) Monitor health and restart if needed
+4) Stop it on shutdown
 
 ### Manual MQTT Server Management
 
@@ -97,19 +104,27 @@ docker-compose down
 
 ## Configuration
 
-The bridge uses YAML configuration files. Here's a basic example:
+See `config.example.yaml` for a complete, working template. Important excerpts:
 
 ```yaml
-# Input sources
+servers:
+  - name: modbus-server
+    type: modbus
+    enabled: true
+    address: ":502"
+    persistence_file: "register_values.json"
+
 inputs:
-  - name: sensor-input
+  - name: water-aws-input
     type: mqtt
-    broker: localhost:1883
-    client_id: bridge-input-1
+    broker: tls://agi8wtqgu97at-ats.iot.ap-southeast-2.amazonaws.com:8883
+    client_id: protocol-bridge-water
     topics:
-      - sensors/temperature
-      - sensors/humidity
+      - pfd/ot/water
     qos: 1
+    cert_path: certs/input/aws-iot-ap-southeast-2/certificate.pem.crt
+    key_path:  certs/input/aws-iot-ap-southeast-2/private.pem.key
+    ca_path:   certs/input/aws-iot-ap-southeast-2/ca.pem
 
 # Transformers
 transformers:
@@ -125,23 +140,18 @@ transformers:
         };
       }
 
-# Output destinations
 outputs:
-  - name: temp-output
-    type: mqtt
-    broker: localhost:1883
-    client_id: bridge-output-temp
-    topic: processed/temperature
-    qos: 1
+  - name: water-modbus-output
+    type: modbus
+    server: modbus-server
 
-# Pipelines (1 input -> many outputs)
 pipelines:
-  - name: sensor-pipeline
-    input: sensor-input
+  - name: water-modbus-pipeline
+    input: water-aws-input
     routes:
-      - transformer: temperature-transform
+      - transformer: water-pass-through
         outputs:
-          - temp-output
+          - water-modbus-output
 ```
 
 ## Architecture
@@ -158,7 +168,7 @@ pipelines:
 
 - **Input**: MQTT client that subscribes to topics and forwards messages
 - **Transformer**: JavaScript runtime for message transformation
-- **Output**: MQTT client that publishes messages to topics
+- **Output**: MQTT or Modbus
 - **Pipeline**: Orchestrates message flow through the system
 - **Retry Manager**: Handles retry logic with exponential backoff
 - **DLQ Manager**: Manages failed message handling with size limits
@@ -233,6 +243,30 @@ logging:
   level: info  # debug, info, warn, error
   format: json # json, console
 ```
+
+## Modbus Semantics and Client Access
+
+- Modbus TCP server listens on `:502` (configurable).
+- Each 32‑bit signed value is stored across two holding registers in big‑endian word order: high word at offset N, low word at offset N+1.
+- Legacy addressing is supported: for a conventional server register R (e.g., 403021), the bridge writes at register offset `R − 400001` (e.g., 3020).
+- Reads are logged at info level: `Modbus poll (FC03)` with server address, remote, unitID, startAddress, quantity.
+
+Example (read Unit ID 5, server register 403021):
+
+```bash
+# offset = 403021 - 400001 = 3020, read 2 registers
+mbpoll -m tcp -a 5 -r 3020 -c 2 127.0.0.1 502
+```
+
+## Troubleshooting
+
+- Port 502 permission denied under systemd:
+  - Ensure the unit has `NoNewPrivileges=false`, and includes
+    `AmbientCapabilities=CAP_NET_BIND_SERVICE` and `CapabilityBoundingSet=CAP_NET_BIND_SERVICE`.
+  - Alternatively, run `sudo setcap 'cap_net_bind_service=+ep' ./bridge` (must re-run after rebuilding the binary unless the unit grants caps).
+- No MQTT messages after long uptime:
+  - Subscriptions are automatically restored on reconnect. Check logs for `connected to MQTT broker` and ensure your topics are correct.
+- See `docs/troubleshooting.md` for deeper diagnostics.
 
 ## Development
 
