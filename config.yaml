@@ -1,0 +1,292 @@
+# Protocol Bridge Configuration Example
+
+# Hosted servers managed by the bridge
+servers:
+  - name: local-mqtt
+    type: mqtt
+    enabled: true
+    broker: localhost:1883
+    # The bridge will automatically:
+    # 1. Check if MQTT server is already running on localhost:1883
+    # 2. If not running, start it using docker-compose in mqtt/server/
+    # 3. Monitor and maintain the server lifecycle
+    # 4. Stop the server when the bridge shuts down
+  - name: modbus-server
+    type: modbus
+    enabled: true
+    address: ":502"
+    persistence_file: "register_values.json"
+    
+# Input sources
+inputs:
+  - name: people-counter-input
+    type: mqtt
+    broker: localhost:1883
+    client_id: bridge-people-counter
+    topics:
+      # Subscribe to all messages, will filter for CountAggregation/Counter
+      - "#"
+    qos: 1
+    username: ""
+    password: ""
+  - name: water-meter-input
+    type: mqtt
+    broker: tls://agi8wtqgu97at-ats.iot.ap-southeast-2.amazonaws.com:8883
+    client_id: protocol-bridge-water-meter
+    topics:
+      - pfd/ot/water
+    qos: 1
+    username: ""
+    password: ""
+    cert_path: certs/input/aws-iot-ap-southeast-2/certificate.pem.crt
+    key_path: certs/input/aws-iot-ap-southeast-2/private.pem.key
+    ca_path: certs/input/aws-iot-ap-southeast-2/ca.pem
+  - name: car-counting-input
+    type: mqtt
+    broker: localhost:1883
+    client_id: bridge-car-counting
+    topics:
+      # Subscribe to BEN-TCP2-Green car counting messages (Inbound/Outbound)
+      - "BEN-TCP2-Green/onvif-ej/RuleEngine/CountAggregation/Counter/&1/Inbound"
+      - "BEN-TCP2-Green/onvif-ej/RuleEngine/CountAggregation/Counter/&1/Outbound"
+    qos: 1
+    username: ""
+    password: ""
+    
+# Transformation pipelines (1 input -> many outputs)
+pipelines:
+  - name: people-counter-pipeline
+    input: people-counter-input
+    routes:
+      - transformer: people-counter-transform
+        outputs:
+          - aws-iot-output
+  - name: bridge-water-meter
+    input: water-meter-input
+    routes:
+      - transformer: water-meter-passthrough
+        outputs:
+          - water-meter-modbus-output
+  - name: car-counting-pipeline
+    input: car-counting-input
+    routes:
+      - transformer: car-counting-transform
+        outputs:
+          - aws-iot-output
+          
+# Transformers with JavaScript support
+transformers:
+  - name: people-counter-transform
+    type: javascript
+    script: |
+      function transform(input, context) {
+        var topic = context.topic;
+        
+        // Only process messages from CountAggregation/Counter
+        // Filter out all other ONVIF messages (VideoSource, Device, IVA, etc.)
+        if (!topic.includes("onvif-ej/RuleEngine/CountAggregation/Counter")) {
+          // Skip all non-CountAggregation messages
+          return null;
+        }
+        
+        // Additional validation - must match the full path pattern
+        if (!topic.match(/\/CountAggregation\/Counter\//)) {
+          return null;
+        }
+        
+        // Parse the topic to extract device info dynamically
+        // Example: 418-PCD-01-0001/onvif-ej/RuleEngine/CountAggregation/Counter/&1/Internal Door Inbound
+        // Or: 431-PCD-B1-0001/onvif-ej/RuleEngine/CountAggregation/Counter/&1/Inbound
+        var parts = topic.split("/");
+        var deviceId = parts[0]; // First part is always device ID
+        var deviceName = null;
+        var direction = null;
+        
+        // Find the direction and device name from the topic
+        // Topics like: "418-PCD-01-0001/.../Internal Door Inbound" or "431-PCD-B1-0001/.../Inbound"
+        var lastSegment = parts[parts.length - 1];
+        var secondLastSegment = parts.length > 1 ? parts[parts.length - 2] : null;
+        
+        // Determine direction from last segment
+        if (lastSegment.includes("Inbound")) {
+          direction = "inbound";
+          // Device name is the previous segment (e.g., "Internal Door" or just before "Inbound")
+          if (secondLastSegment) {
+            deviceName = secondLastSegment.replace(/\s+/g, "");
+          }
+        } else if (lastSegment.includes("Outbound")) {
+          direction = "outbound";
+          // Device name is the previous segment (e.g., "Internal Door" or just before "Outbound")
+          if (secondLastSegment) {
+            deviceName = secondLastSegment.replace(/\s+/g, "");
+          }
+        }
+        
+        // Clean up device name
+        if (deviceName) {
+          deviceName = deviceName.replace(/Door/g, "");
+          deviceName = deviceName.toLowerCase();
+          
+          // Special handling for known devices
+          if (deviceName.includes("internal")) {
+            deviceName = "internalDoor";
+          } else if (deviceName.includes("external")) {
+            deviceName = "externalDoor";
+          } else if (deviceName.includes("basement")) {
+            deviceName = "basementAutodoor";
+          } else if (!deviceName || deviceName.length === 0) {
+            // For 431 with just "Inbound"/"Outbound", device name is the device ID prefix
+            deviceName = "autoDoor"; // Default for cameras without specific door names
+          }
+        } else {
+          // Default device name
+          deviceName = "autoDoor";
+        }
+        
+        // Construct thingName dynamically
+        var thingName = deviceId + "-" + deviceName;
+        
+        // Validate we have all required data
+        if (!direction || !deviceName || !deviceId) {
+          console.log("Could not parse topic: " + topic);
+          return null;
+        }
+        
+        // Transform the payload
+        return {
+          iotThingName: thingName,
+          PayloadData: {
+            provider: "MQTT-Bosch",
+            timestamp: input.UtcTime,
+            count: input.Data.Count,
+            direction: direction,
+            cameraId: deviceName
+          }
+        };
+      }
+  - name: water-meter-passthrough
+    type: javascript
+    script: |
+      function transform(input) { 
+        // Pass through the entire message as-is - it already contains transformedPayload with liters
+        return input; 
+      }
+  - name: car-counting-transform
+    type: javascript
+    script: |
+      function transform(input, context) {
+        var topic = context.topic;
+        var OVERFLOW_THRESHOLD = 1000000000;
+        
+        // Only process messages from BEN-TCP2-Green CountAggregation/Counter
+        if (!topic.includes("BEN-TCP2-Green") || !topic.includes("onvif-ej/RuleEngine/CountAggregation/Counter")) {
+          return null;
+        }
+        
+        // Parse topic to extract direction
+        var parts = topic.split("/");
+        var lastSegment = parts[parts.length - 1];
+        var direction = null;
+        
+        if (lastSegment.includes("Inbound")) {
+          direction = "inbound";
+        } else if (lastSegment.includes("Outbound")) {
+          direction = "outbound";
+        } else {
+          return null; // Not Inbound or Outbound
+        }
+        
+        // Extract count from message
+        var currentCount = input.Data && input.Data.Count ? input.Data.Count : 0;
+        
+        // Get previous counts from state
+        var prevInbound = state.get("inbound") || 0;
+        var prevOutbound = state.get("outbound") || 0;
+        
+        // Handle overflow detection
+        var newCount = currentCount;
+        if (direction === "inbound") {
+          // Check for overflow: if new count < previous AND previous > threshold, reset occurred
+          if (newCount < prevInbound && prevInbound > OVERFLOW_THRESHOLD) {
+            // Overflow reset - use new count as-is
+            newCount = currentCount;
+          } else {
+            // Normal increment - use current count
+            newCount = currentCount;
+          }
+          state.setAndSave("inbound", newCount);
+        } else if (direction === "outbound") {
+          // Check for overflow: if new count < previous AND previous > threshold, reset occurred
+          if (newCount < prevOutbound && prevOutbound > OVERFLOW_THRESHOLD) {
+            // Overflow reset - use new count as-is
+            newCount = currentCount;
+          } else {
+            // Normal increment - use current count
+            newCount = currentCount;
+          }
+          state.setAndSave("outbound", newCount);
+        }
+        
+        // Get latest values (may have been updated above)
+        var inbound = state.get("inbound") || 0;
+        var outbound = state.get("outbound") || 0;
+        
+        // Calculate occupied
+        var occupied = inbound - outbound;
+        
+        // Output format matching AWS IoT expectations
+        return {
+          iotThingName: "BEN-TCP2-Green-carCounter",
+          PayloadData: {
+            provider: "MQTT-Bosch",
+            timestamp: input.UtcTime || new Date().toISOString(),
+            inbound: inbound,
+            outbound: outbound,
+            occupied: occupied
+          }
+        };
+      }
+      
+# Output destinations
+outputs:
+  - name: aws-iot-output
+    type: mqtt
+    broker: tls://agi8wtqgu97at-ats.iot.ap-southeast-2.amazonaws.com:8883
+    client_id: protocol-bridge-aws-iot
+    topic: pfd/ot/peopleCounter/bosch5100i/raw
+    qos: 1
+    retain: false
+    username: ""
+    password: ""
+    cert_path: certs/output/aws-iot-ap-southeast-2/certificate.pem.crt
+    key_path: certs/output/aws-iot-ap-southeast-2/private.pem.key
+    ca_path: certs/output/aws-iot-ap-southeast-2/ca.pem
+  - name: water-meter-modbus-output
+    type: modbus
+    server: modbus-server
+    
+# Error handling configuration
+error_handling:
+  retry:
+    enabled: true
+    max_attempts: 3
+    initial_interval: 1s
+    max_interval: 30s
+    multiplier: 2.0
+  dead_letter_queue:
+    enabled: true
+    type: mqtt
+    broker: localhost:1883
+    topic: dlq/failed-messages
+    max_size: 100    # Maximum DLQ size in MB
+    alert_size: 50   # Alert when DLQ reaches this size in MB
+    
+# Logging
+logging:
+  level: info
+  format: json
+  file: logs/bridge.log
+  max_size: 100      # MB
+  max_age: 7         # days
+  max_backups: 5
+  compress: true
