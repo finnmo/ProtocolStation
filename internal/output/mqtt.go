@@ -20,11 +20,13 @@ import (
 
 // MQTTOutput implements the Output interface for MQTT brokers
 type MQTTOutput struct {
-	name   string
-	config config.OutputConfig
-	client mqtt.Client
-	logger *zap.Logger
-	mu     sync.RWMutex
+	name    string
+	config  config.OutputConfig
+	client  mqtt.Client
+	logger  *zap.Logger
+	mu      sync.RWMutex
+	started bool
+	startMu sync.Mutex
 }
 
 // NewMQTTOutput creates a new MQTT output
@@ -36,8 +38,18 @@ func NewMQTTOutput(cfg config.OutputConfig, logger *zap.Logger) *MQTTOutput {
 	}
 }
 
-// Start initializes the MQTT connection
+// Start initializes the MQTT connection (idempotent - safe to call multiple times)
 func (m *MQTTOutput) Start(ctx context.Context) error {
+	m.startMu.Lock()
+	defer m.startMu.Unlock()
+
+	// If already started, return early
+	if m.started {
+		m.logger.Debug("MQTT output already started, skipping",
+			zap.String("name", m.name))
+		return nil
+	}
+
 	opts := mqtt.NewClientOptions()
 
 	// Add broker (with or without tls:// prefix)
@@ -114,14 +126,19 @@ func (m *MQTTOutput) Start(ctx context.Context) error {
 		}
 	}()
 
+	m.started = true
 	return nil
 }
 
 // Stop closes the MQTT connection
 func (m *MQTTOutput) Stop() error {
+	m.startMu.Lock()
+	defer m.startMu.Unlock()
+
 	if m.client != nil && m.client.IsConnected() {
 		m.client.Disconnect(250)
 	}
+	m.started = false
 	return nil
 }
 
@@ -131,14 +148,17 @@ func (m *MQTTOutput) Send(ctx context.Context, msg *message.Message) error {
 		return fmt.Errorf("MQTT client not connected")
 	}
 
-	// Convert message to JSON
-	data, err := msg.ToJSON()
-	if err != nil {
-		return fmt.Errorf("failed to serialize message: %w", err)
+	// Publish only the transformed payload (already JSON from transformer)
+	if msg.Payload == nil {
+		return fmt.Errorf("message payload is empty")
 	}
 
-	// Publish message
-	token := m.client.Publish(m.config.Topic, byte(m.config.QoS), m.config.Retain, data)
+	token := m.client.Publish(
+		m.config.Topic,
+		byte(m.config.QoS),
+		m.config.Retain,
+		[]byte(msg.Payload),
+	)
 
 	// Wait for completion with context timeout
 	done := make(chan error, 1)
