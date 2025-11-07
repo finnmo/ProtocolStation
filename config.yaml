@@ -99,7 +99,7 @@ transformers:
         // Or: 431-PCD-B1-0001/onvif-ej/RuleEngine/CountAggregation/Counter/&1/Inbound
         var parts = topic.split("/");
         var deviceId = parts[0]; // First part is always device ID
-        var deviceName = null;
+        var deviceTag = null;
         var direction = null;
         
         // Find the direction and device name from the topic
@@ -110,44 +110,39 @@ transformers:
         // Determine direction from last segment
         if (lastSegment.includes("Inbound")) {
           direction = "inbound";
-          // Device name is the previous segment (e.g., "Internal Door" or just before "Inbound")
-          if (secondLastSegment) {
-            deviceName = secondLastSegment.replace(/\s+/g, "");
-          }
         } else if (lastSegment.includes("Outbound")) {
           direction = "outbound";
-          // Device name is the previous segment (e.g., "Internal Door" or just before "Outbound")
-          if (secondLastSegment) {
-            deviceName = secondLastSegment.replace(/\s+/g, "");
-          }
         }
         
-        // Clean up device name
-        if (deviceName) {
-          deviceName = deviceName.replace(/Door/g, "");
-          deviceName = deviceName.toLowerCase();
-          
-          // Special handling for known devices
-          if (deviceName.includes("internal")) {
-            deviceName = "internalDoor";
-          } else if (deviceName.includes("external")) {
-            deviceName = "externalDoor";
-          } else if (deviceName.includes("basement")) {
-            deviceName = "basementAutodoor";
-          } else if (!deviceName || deviceName.length === 0) {
-            // For 431 with just "Inbound"/"Outbound", device name is the device ID prefix
-            deviceName = "autoDoor"; // Default for cameras without specific door names
+        if (secondLastSegment) {
+          var rawTag = secondLastSegment.replace(/\s+/g, "");
+
+          if (rawTag && !rawTag.match(/^&\d+$/)) {
+            var normalized = rawTag.replace(/Door/gi, "");
+            var lower = normalized.toLowerCase();
+
+            if (lower.includes("internal")) {
+              deviceTag = "internalDoor";
+            } else if (lower.includes("external")) {
+              deviceTag = "externalDoor";
+            } else if (lower.includes("basement")) {
+              deviceTag = "basementAutodoor";
+            } else if (lower.length > 0) {
+              deviceTag = lower;
+            }
           }
-        } else {
-          // Default device name
-          deviceName = "autoDoor";
         }
-        
-        // Construct thingName dynamically
-        var thingName = deviceId + "-" + deviceName;
-        
+
+        var thingName = deviceId;
+        var cameraIdentifier = deviceId;
+
+        if (deviceTag) {
+          thingName = deviceId + "-" + deviceTag;
+          cameraIdentifier = deviceTag;
+        }
+
         // Validate we have all required data
-        if (!direction || !deviceName || !deviceId) {
+        if (!direction || !deviceId) {
           console.log("Could not parse topic: " + topic);
           return null;
         }
@@ -160,7 +155,7 @@ transformers:
             timestamp: input.UtcTime,
             count: input.Data.Count,
             direction: direction,
-            cameraId: deviceName
+            cameraId: cameraIdentifier
           }
         };
       }
