@@ -80,82 +80,113 @@ transformers:
     type: javascript
     script: |
       function transform(input, context) {
-        var topic = context.topic;
-        
-        // Only process messages from CountAggregation/Counter
-        // Filter out all other ONVIF messages (VideoSource, Device, IVA, etc.)
-        if (!topic.includes("onvif-ej/RuleEngine/CountAggregation/Counter")) {
-          // Skip all non-CountAggregation messages
-          return null;
+        var topic = context.topic || "";
+
+        function parseNewTopicFormat(topic) {
+          // Supports topics containing "Camera Name: <id>" and "Counter Name: <tag>-<direction>"
+          var cameraName = null;
+          var counterName = null;
+          var segments = topic.split("/");
+          for (var i = 0; i < segments.length; i++) {
+            var seg = segments[i].trim();
+            var camMatch = seg.match(/^Camera Name:\s*(.+)$/i);
+            if (camMatch && camMatch[1]) {
+              cameraName = camMatch[1].trim();
+              continue;
+            }
+            var ctrMatch = seg.match(/^Counter Name:\s*(.+)$/i);
+            if (ctrMatch && ctrMatch[1]) {
+              counterName = ctrMatch[1].trim();
+              continue;
+            }
+          }
+          if (!cameraName && segments.length > 0) {
+            // Fallback to first segment as camera name if explicit label is missing
+            cameraName = segments[0].trim();
+          }
+          if (!counterName) {
+            return null;
+          }
+          var direction = null;
+          var tagPart = counterName;
+          var hyphenIndex = counterName.lastIndexOf("-");
+          if (hyphenIndex > -1) {
+            var possibleDir = counterName.substring(hyphenIndex + 1).toLowerCase();
+            if (possibleDir === "inbound" || possibleDir === "outbound") {
+              direction = possibleDir;
+              tagPart = counterName.substring(0, hyphenIndex);
+            }
+          }
+          // Use tag as-is (trimmed), no mappings; strip surrounding whitespace only
+          var deviceTag = (tagPart || "").trim();
+          return {
+            deviceId: cameraName,
+            deviceTag: deviceTag,
+            direction: direction
+          };
         }
-        
-        // Additional validation - must match the full path pattern
-        if (!topic.match(/\/CountAggregation\/Counter\//)) {
-          return null;
-        }
-        
-        // Parse the topic to extract device info dynamically
-        // Example: 418-PCD-01-0001/onvif-ej/RuleEngine/CountAggregation/Counter/&1/Internal Door Inbound
-        // Or: 431-PCD-B1-0001/onvif-ej/RuleEngine/CountAggregation/Counter/&1/Inbound
-        var parts = topic.split("/");
-        var deviceId = parts[0]; // First part is always device ID
+
+        var isNewFormat = /Counter Name:/i.test(topic) || /Camera Name:/i.test(topic);
+
+        var deviceId = null;
         var deviceTag = null;
         var direction = null;
-        
-        // Find the direction and device name from the topic
-        // Topics like: "418-PCD-01-0001/.../Internal Door Inbound" or "431-PCD-B1-0001/.../Inbound"
-        var lastSegment = parts[parts.length - 1];
-        var secondLastSegment = parts.length > 1 ? parts[parts.length - 2] : null;
-        
-        // Determine direction from last segment
-        if (lastSegment.includes("Inbound")) {
-          direction = "inbound";
-        } else if (lastSegment.includes("Outbound")) {
-          direction = "outbound";
+
+        if (isNewFormat) {
+          var parsed = parseNewTopicFormat(topic);
+          if (parsed) {
+            deviceId = parsed.deviceId;
+            deviceTag = parsed.deviceTag;
+            direction = parsed.direction;
+          }
         }
-        
-        if (secondLastSegment) {
-          var rawTag = secondLastSegment.replace(/\s+/g, "");
 
-          if (rawTag && !rawTag.match(/^&\d+$/)) {
-            var normalized = rawTag.replace(/Door/gi, "");
-            var lower = normalized.toLowerCase();
-
-            if (lower.includes("internal")) {
-              deviceTag = "internalDoor";
-            } else if (lower.includes("external")) {
-              deviceTag = "externalDoor";
-            } else if (lower.includes("basement")) {
-              deviceTag = "basementAutodoor";
-            } else if (lower.length > 0) {
-              deviceTag = lower;
+        // Fallback to legacy ONVIF topic parsing if new format not detected
+        if (!deviceId || !deviceTag || !direction) {
+          // Only process messages from CountAggregation/Counter
+          if (!topic.includes("onvif-ej/RuleEngine/CountAggregation/Counter") || !topic.match(/\/CountAggregation\/Counter\//)) {
+            // If neither new format nor legacy format matches, skip
+            if (!isNewFormat) {
+              return null;
+            }
+          } else {
+            var parts = topic.split("/");
+            deviceId = deviceId || parts[0];
+            var lastSegment = parts[parts.length - 1];
+            var secondLastSegment = parts.length > 1 ? parts[parts.length - 2] : null;
+            if (!direction) {
+              if (lastSegment.includes("Inbound")) {
+                direction = "inbound";
+              } else if (lastSegment.includes("Outbound")) {
+                direction = "outbound";
+              }
+            }
+            if (!deviceTag && secondLastSegment) {
+              var tagCandidate = secondLastSegment.trim();
+              if (tagCandidate && !tagCandidate.match(/^&\d+$/)) {
+                var cleaned = tagCandidate.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                if (cleaned.length > 0) {
+                  deviceTag = cleaned;
+                }
+              }
             }
           }
         }
 
-        var thingName = deviceId;
-        var cameraIdentifier = deviceId;
-
-        if (deviceTag) {
-          thingName = deviceId + "-" + deviceTag;
-          cameraIdentifier = deviceTag;
-        }
-
-        // Validate we have all required data
-        if (!direction || !deviceId) {
+        if (!deviceId || !deviceTag || !direction) {
           console.log("Could not parse topic: " + topic);
           return null;
         }
-        
-        // Transform the payload
+
+        var thingName = deviceId + "-" + deviceTag;
+
         return {
           iotThingName: thingName,
           PayloadData: {
             provider: "MQTT-Bosch",
             timestamp: input.UtcTime,
             count: input.Data.Count,
-            direction: direction,
-            cameraId: cameraIdentifier
+            direction: direction
           }
         };
       }
@@ -278,7 +309,7 @@ error_handling:
     
 # Logging
 logging:
-  level: info
+  level: debug
   format: json
   file: logs/bridge.log
   max_size: 100      # MB
