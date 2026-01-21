@@ -60,7 +60,7 @@ pipelines:
     routes:
       - transformer: people-counter-transform
         outputs:
-          - aws-iot-output
+          - aws-iot-output-people
   - name: bridge-water-meter
     input: water-meter-input
     routes:
@@ -72,7 +72,7 @@ pipelines:
     routes:
       - transformer: car-counting-transform
         outputs:
-          - aws-iot-output
+          - aws-iot-output-car
           
 # Transformers with JavaScript support
 transformers:
@@ -154,11 +154,20 @@ transformers:
             deviceId = deviceId || parts[0];
             var lastSegment = parts[parts.length - 1];
             var secondLastSegment = parts.length > 1 ? parts[parts.length - 2] : null;
-            if (!direction) {
-              if (lastSegment.includes("Inbound")) {
-                direction = "inbound";
-              } else if (lastSegment.includes("Outbound")) {
-                direction = "outbound";
+            // Handle "<tag>-<direction>" pattern in the last segment
+            var dirTagMatch = lastSegment.match(/^(.+?)-(inbound|outbound)$/i);
+            if (dirTagMatch) {
+              if (!direction) direction = dirTagMatch[2].toLowerCase();
+              if (!deviceTag) deviceTag = dirTagMatch[1].trim();
+            } else {
+              // Case-insensitive detection of direction keywords
+              if (!direction) {
+                var lsLower = lastSegment.toLowerCase();
+                if (lsLower.includes("inbound")) {
+                  direction = "inbound";
+                } else if (lsLower.includes("outbound")) {
+                  direction = "outbound";
+                }
               }
             }
             if (!deviceTag && secondLastSegment) {
@@ -275,10 +284,22 @@ transformers:
       
 # Output destinations
 outputs:
-  - name: aws-iot-output
+  - name: aws-iot-output-people
     type: mqtt
     broker: tls://agi8wtqgu97at-ats.iot.ap-southeast-2.amazonaws.com:8883
-    client_id: protocol-bridge-aws-iot
+    client_id: protocol-bridge-aws-iot-people
+    topic: pfd/ot/peopleCounter/bosch5100i/raw
+    qos: 1
+    retain: false
+    username: ""
+    password: ""
+    cert_path: certs/output/aws-iot-ap-southeast-2/certificate.pem.crt
+    key_path: certs/output/aws-iot-ap-southeast-2/private.pem.key
+    ca_path: certs/output/aws-iot-ap-southeast-2/ca.pem
+  - name: aws-iot-output-car
+    type: mqtt
+    broker: tls://agi8wtqgu97at-ats.iot.ap-southeast-2.amazonaws.com:8883
+    client_id: protocol-bridge-aws-iot-car
     topic: pfd/ot/peopleCounter/bosch5100i/raw
     qos: 1
     retain: false
@@ -309,7 +330,7 @@ error_handling:
     
 # Logging
 logging:
-  level: debug
+  level: info
   format: json
   file: logs/bridge.log
   max_size: 100      # MB

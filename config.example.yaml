@@ -11,14 +11,22 @@ servers:
     # 2. If not running, start it using docker-compose in mqtt/server/
     # 3. Monitor and maintain the server lifecycle
     # 4. Stop the server when the bridge shuts down
-  - name: local-modbus
+  - name: modbus-server
     type: modbus
     enabled: true
     address: ":502"
-    persistence_file: "modbus_registers.json"
+    persistence_file: "register_values.json"
+  - name: bacnet-server
+    type: bacnet
+    enabled: false
+    address: ":47808"
+    device_instances: [12345, 12346]
 
 # Input sources
 inputs:
+  - name: bacnet-input
+    type: bacnet
+    # cov: { enabled: true, lifetime_sec: 300, fallback_poll_sec: 60 }
   - name: sensor-input
     type: mqtt
     broker: localhost:1883
@@ -91,6 +99,9 @@ transformers:
 
 # Output destinations
 outputs:
+  - name: bacnet-output
+    type: bacnet
+    server: bacnet-server
   - name: temp-output
     type: mqtt
     broker: localhost:1883
@@ -112,7 +123,7 @@ outputs:
     topic: backup/all
   - name: water-modbus-output
     type: modbus
-    server: local-modbus
+    server: modbus-server
 
 # Error handling configuration
 error_handling:

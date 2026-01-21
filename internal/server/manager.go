@@ -14,6 +14,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/optech/protocol-bridge/internal/config"
+	"github.com/optech/protocol-bridge/internal/server/bacnet"
 	"github.com/optech/protocol-bridge/internal/server/modbus"
 )
 
@@ -189,6 +190,8 @@ func (s *Server) Start(ctx context.Context) error {
 		return s.startMQTTServer()
 	case "modbus":
 		return s.startModbusServer(ctx)
+	case "bacnet":
+		return s.startBacnetServer(ctx)
 	default:
 		return fmt.Errorf("unsupported server type: %s", s.config.Type)
 	}
@@ -368,6 +371,49 @@ func (s *Server) startModbusServer(ctx context.Context) error {
 
 	s.running = true
 	s.logger.Info("Modbus server started successfully", zap.String("address", address))
+	return nil
+}
+
+// startBacnetServer starts a BACnet/IP server
+func (s *Server) startBacnetServer(ctx context.Context) error {
+	address, _ := s.config.Config["address"].(string)
+	if address == "" {
+		// default BACnet/IP port 47808
+		address = ":47808"
+	}
+
+	// parse device instances list (uint32)
+	var devs []uint32
+	if arr, ok := s.config.Config["device_instances"].([]interface{}); ok {
+		for _, v := range arr {
+			switch t := v.(type) {
+			case int:
+				if t >= 0 {
+					devs = append(devs, uint32(t))
+				}
+			case int64:
+				if t >= 0 {
+					devs = append(devs, uint32(t))
+				}
+			case float64:
+				if t >= 0 {
+					devs = append(devs, uint32(t))
+				}
+			}
+		}
+	}
+	if len(devs) == 0 {
+		devs = []uint32{12345}
+	}
+
+	// create and start BACnet server
+	srv := bacnet.NewServer(address, devs, s.logger)
+	if err := srv.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start BACnet server: %w", err)
+	}
+
+	s.running = true
+	s.logger.Info("BACnet server started successfully", zap.String("address", address), zap.Int("devices", len(devs)))
 	return nil
 }
 

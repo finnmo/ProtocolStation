@@ -70,9 +70,12 @@ func validateConfig(cfg *Config) error {
 		}
 		inputNames[input.Name] = true
 
-		// Validate broker URL
-		if err := validateBrokerURL(input.Broker, field+".broker"); err != nil {
-			v.addError(field+".broker", input.Broker, err.Error(), "Expected format: 'protocol://host:port' or 'host:port'")
+		// Input-type specific validation
+		if input.Type == "mqtt" {
+			// Validate broker URL
+			if err := validateBrokerURL(input.Broker, field+".broker"); err != nil {
+				v.addError(field+".broker", input.Broker, err.Error(), "Expected format: 'protocol://host:port' or 'host:port'")
+			}
 		}
 
 		// Validate client ID
@@ -88,13 +91,15 @@ func validateConfig(cfg *Config) error {
 			clientIDs[input.ClientID] = true
 		}
 
-		// Validate topics
-		if len(input.Topics) == 0 {
-			v.addError(field+".topics", input.Topics, "at least one topic is required", "")
-		}
-		for j, topic := range input.Topics {
-			if err := validateTopic(topic); err != nil {
-				v.addError(fmt.Sprintf("%s.topics[%d]", field, j), topic, err.Error(), "")
+		if input.Type == "mqtt" {
+			// Validate topics
+			if len(input.Topics) == 0 {
+				v.addError(field+".topics", input.Topics, "at least one topic is required", "")
+			}
+			for j, topic := range input.Topics {
+				if err := validateTopic(topic); err != nil {
+					v.addError(fmt.Sprintf("%s.topics[%d]", field, j), topic, err.Error(), "")
+				}
 			}
 		}
 
@@ -152,7 +157,7 @@ func validateConfig(cfg *Config) error {
 			if output.Server == "" {
 				v.addError(field+".server", output.Server, "modbus output requires 'server' to reference a hosted modbus server", "Set outputs[].server to the name of a servers[].name with type 'modbus'")
 			}
-		} else {
+		} else if output.Type == "mqtt" {
 			// MQTT validation (existing)
 			// Validate broker URL
 			if err := validateBrokerURL(output.Broker, field+".broker"); err != nil {
@@ -184,6 +189,11 @@ func validateConfig(cfg *Config) error {
 			// Validate QoS
 			if output.QoS < 0 || output.QoS > 2 {
 				v.addError(field+".qos", output.QoS, "QoS must be between 0 and 2", "Valid values: 0 (at most once), 1 (at least once), 2 (exactly once)")
+			}
+		} else if output.Type == "bacnet" {
+			// BACnet outputs must reference a hosted server name
+			if output.Server == "" {
+				v.addError(field+".server", output.Server, "bacnet output requires 'server' to reference a hosted bacnet server", "Set outputs[].server to the name of a servers[].name with type 'bacnet'")
 			}
 		}
 	}
@@ -289,8 +299,8 @@ func validateTopic(topic string) error {
 		return fmt.Errorf("topic cannot be empty")
 	}
 
-	// Check for valid characters in topic
-	matched, err := regexp.MatchString(`^[a-zA-Z0-9/+#_\-]+$`, topic)
+	// Check for valid characters in topic (including & which is used in ONVIF counter topics)
+	matched, err := regexp.MatchString(`^[a-zA-Z0-9/+#_\-&]+$`, topic)
 	if err != nil {
 		return fmt.Errorf("error validating topic: %v", err)
 	}

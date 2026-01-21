@@ -1,0 +1,13 @@
+[0;1;32m●[0m protocol-bridge.service - Protocol Bridge - IoT Message Protocol Bridge
+     Loaded: loaded (]8;;file://OperationalTechnologyNUC-03/etc/systemd/system/protocol-bridge.service/etc/systemd/system/protocol-bridge.service]8;;; [0;1;32menabled[0m; preset: [0;1;32menabled[0m)
+     Active: [0;1;32mactive (running)[0m since Tue 2025-11-04 12:36:13 AWST; 1s ago
+   Main PID: 589404 (bridge)
+      Tasks: 9 (limit: 9145)
+     Memory: 6.8M (peak: 7.4M)
+        CPU: 250ms
+     CGroup: /system.slice/protocol-bridge.service
+             └─[0;38;5;245m589404 /home/optech/ProtocolBridge/bridge -config /home/optech/ProtocolBridge/config.yaml[0m
+
+Nov 04 12:36:13 OperationalTechnologyNUC-03 systemd[1]: protocol-bridge.service: Scheduled restart job, restart counter is at 35.
+Nov 04 12:36:13 OperationalTechnologyNUC-03 systemd[1]: Starting protocol-bridge.service - Protocol Bridge - IoT Message Protocol Bridge...
+Nov 04 12:36:13 OperationalTechnologyNUC-03 systemd[1]: Started protocol-bridge.service - Protocol Bridge - IoT Message Protocol Bridge.

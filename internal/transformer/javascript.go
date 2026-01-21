@@ -15,21 +15,37 @@ import (
 
 // JavaScriptTransformer implements the Transformer interface using JavaScript
 type JavaScriptTransformer struct {
-	name    string
-	config  config.TransformerConfig
-	vm      *goja.Runtime
-	logger  *zap.Logger
-	timeout time.Duration
+	name        string
+	config      config.TransformerConfig
+	vm          *goja.Runtime
+	logger      *zap.Logger
+	timeout     time.Duration
+	stateStorage *StateStorage
+	stopAutoSave chan struct{}
 }
 
 // NewJavaScriptTransformer creates a new JavaScript transformer
-func NewJavaScriptTransformer(cfg config.TransformerConfig, logger *zap.Logger) *JavaScriptTransformer {
-	return &JavaScriptTransformer{
+func NewJavaScriptTransformer(cfg config.TransformerConfig, logger *zap.Logger) (*JavaScriptTransformer, error) {
+	jt := &JavaScriptTransformer{
 		name:    cfg.Name,
 		config:  cfg,
 		logger:  logger,
 		timeout: 5 * time.Second,
 	}
+
+	// Initialize state storage for this transformer (file named after transformer)
+	stateFile := fmt.Sprintf("state_%s.json", cfg.Name)
+	stateStorage, err := NewStateStorage(stateFile, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create state storage: %w", err)
+	}
+	jt.stateStorage = stateStorage
+	jt.stopAutoSave = make(chan struct{})
+
+	// Start auto-save goroutine (saves every 30 seconds if dirty)
+	go stateStorage.AutoSave(30*time.Second, jt.stopAutoSave)
+
+	return jt, nil
 }
 
 // Transform processes a message using JavaScript
@@ -68,6 +84,31 @@ func (j *JavaScriptTransformer) Transform(ctx context.Context, msg *message.Mess
 		vm.Set("console", map[string]interface{}{
 			"log": func(args ...interface{}) {
 				j.logger.Debug("JS console.log", zap.Any("args", args))
+			},
+		})
+
+		// Expose state storage API to JavaScript
+		vm.Set("state", map[string]interface{}{
+			"get": func(key string) interface{} {
+				value, ok := j.stateStorage.Get(key)
+				if !ok {
+					return nil
+				}
+				return value
+			},
+			"set": func(key string, value interface{}) {
+				if err := j.stateStorage.Set(key, value); err != nil {
+					j.logger.Error("failed to set state value",
+						zap.String("key", key),
+						zap.Error(err))
+				}
+			},
+			"setAndSave": func(key string, value interface{}) {
+				if err := j.stateStorage.SetAndSave(key, value); err != nil {
+					j.logger.Error("failed to set and save state value",
+						zap.String("key", key),
+						zap.Error(err))
+				}
 			},
 		})
 
@@ -148,4 +189,15 @@ func (j *JavaScriptTransformer) Name() string {
 // Type returns the transformer type
 func (j *JavaScriptTransformer) Type() string {
 	return "javascript"
+}
+
+// Stop stops the transformer and saves state
+func (j *JavaScriptTransformer) Stop() error {
+	if j.stopAutoSave != nil {
+		close(j.stopAutoSave)
+	}
+	if j.stateStorage != nil {
+		return j.stateStorage.Save()
+	}
+	return nil
 }
