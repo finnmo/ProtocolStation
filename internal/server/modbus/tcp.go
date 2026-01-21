@@ -222,6 +222,21 @@ func (s *TCPServer) handleReadHoldingRegisters(c net.Conn, transactionID uint16,
 	copy(registers, slave.HR[start:start+reqQty])
 	slave.Mu.RUnlock()
 
+	// Log what we're sending to PME for unit 22 (debugging consumption calculation issue)
+	if unitID == 22 && startAddress == 3020 && quantity == 2 {
+		// Reconstruct the 32-bit value to verify what PME will read
+		// Big-endian: high word (registers[0]) then low word (registers[1])
+		combinedValueBE := int32(uint32(registers[0])<<16 | uint32(registers[1]))
+		// Also calculate if PME reads registers swapped (little-endian word order)
+		combinedValueLE := int32(uint32(registers[1])<<16 | uint32(registers[0]))
+		s.logger.Info("PME read for unit 22 - diagnostic",
+			zap.Uint16("register_3020", registers[0]),
+			zap.Uint16("register_3021", registers[1]),
+			zap.Int32("value_if_big_endian", combinedValueBE),
+			zap.Int32("value_if_registers_swapped", combinedValueLE),
+			zap.String("remote", c.RemoteAddr().String()))
+	}
+
 	// Build response
 	byteCount := uint8(len(registers) * 2)
 	responsePDU := make([]byte, 2+len(registers)*2)

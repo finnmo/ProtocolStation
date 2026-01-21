@@ -35,6 +35,8 @@ type ServerContext struct {
 	persistenceFile string
 	logger          *zap.Logger
 	address         string
+	previousValues  map[string]int32 // Track previous values by "unitID:registerOffset" for rollback detection
+	prevValuesMu    sync.RWMutex     // Mutex for previousValues map
 }
 
 // NewServerContext creates a new Modbus server context
@@ -43,6 +45,7 @@ func NewServerContext(persistenceFile string, logger *zap.Logger) *ServerContext
 		Slaves:          make(map[int]*SlaveContext),
 		persistenceFile: persistenceFile,
 		logger:          logger,
+		previousValues:  make(map[string]int32),
 	}
 
 	// Pre-allocate slave contexts for unit IDs 1 to 100
@@ -90,40 +93,39 @@ func (sc *ServerContext) LoadSavedValues() error {
 		return fmt.Errorf("error unmarshaling saved values: %w", err)
 	}
 
-	count := 0
-	for _, v := range values {
-		if v.Timestamp < time.Now().Add(-24*time.Hour).Unix() {
-			sc.logger.Debug("Skipping old value",
-				zap.Int("unitID", v.UnitID),
-				zap.Int("offset", v.RegisterOffset))
-			continue
+		count := 0
+		for _, v := range values {
+			slave, ok := sc.Slaves[v.UnitID]
+			if !ok {
+				sc.logger.Warn("Unit not found for saved value",
+					zap.Int("unitID", v.UnitID))
+				continue
+			}
+
+			// Convert int32 to two uint16 values (big endian)
+			buf := make([]byte, 4)
+			binary.BigEndian.PutUint32(buf, uint32(v.Value))
+			r1 := binary.BigEndian.Uint16(buf[0:2])
+			r2 := binary.BigEndian.Uint16(buf[2:4])
+
+			slave.Mu.Lock()
+			if v.RegisterOffset >= 0 && v.RegisterOffset+1 < len(slave.HR) {
+				slave.HR[v.RegisterOffset] = r1
+				slave.HR[v.RegisterOffset+1] = r2
+				count++
+			}
+			slave.Mu.Unlock()
+
+			// Initialize previous value tracking for rollback detection
+			key := fmt.Sprintf("%d:%d", v.UnitID, v.RegisterOffset)
+			sc.prevValuesMu.Lock()
+			sc.previousValues[key] = v.Value
+			sc.prevValuesMu.Unlock()
 		}
 
-		slave, ok := sc.Slaves[v.UnitID]
-		if !ok {
-			sc.logger.Warn("Unit not found for saved value",
-				zap.Int("unitID", v.UnitID))
-			continue
-		}
-
-		// Convert int32 to two uint16 values (big endian)
-		buf := make([]byte, 4)
-		binary.BigEndian.PutUint32(buf, uint32(v.Value))
-		r1 := binary.BigEndian.Uint16(buf[0:2])
-		r2 := binary.BigEndian.Uint16(buf[2:4])
-
-		slave.Mu.Lock()
-		if v.RegisterOffset >= 0 && v.RegisterOffset+1 < len(slave.HR) {
-			slave.HR[v.RegisterOffset] = r1
-			slave.HR[v.RegisterOffset+1] = r2
-			count++
-		}
-		slave.Mu.Unlock()
-	}
-
-	sc.logger.Info("Loaded saved register values",
-		zap.Int("count", count))
-	return nil
+		sc.logger.Info("Loaded saved register values",
+			zap.Int("count", count))
+		return nil
 }
 
 // SaveValue saves a register value to the persistence file
@@ -142,15 +144,36 @@ func (sc *ServerContext) SaveValue(unitID int, registerOffset int, value int32) 
 	// Read existing values
 	var values []RegisterValue
 	if data, err := os.ReadFile(sc.persistenceFile); err == nil {
-		json.Unmarshal(data, &values)
+		if err := json.Unmarshal(data, &values); err != nil {
+			sc.logger.Warn("Failed to unmarshal persistence file, starting with empty values",
+				zap.String("file", sc.persistenceFile),
+				zap.Error(err))
+			values = []RegisterValue{} // Start with empty slice on unmarshal error
+		}
 	}
 
-	// Cleanup: remove entries older than 30 days to prevent unbounded growth
+	// Cleanup: prefer recent entries but always keep the latest value per (unitID, registerOffset)
 	cutoffTime := time.Now().Add(-30 * 24 * time.Hour).Unix()
+	latestByKey := make(map[string]RegisterValue)
+	for _, v := range values {
+		key := fmt.Sprintf("%d:%d", v.UnitID, v.RegisterOffset)
+		if cur, ok := latestByKey[key]; !ok || v.Timestamp > cur.Timestamp {
+			latestByKey[key] = v
+		}
+	}
 	cleanedValues := make([]RegisterValue, 0, len(values))
+	keptKeys := make(map[string]struct{})
 	for _, v := range values {
 		if v.Timestamp >= cutoffTime {
 			cleanedValues = append(cleanedValues, v)
+			keptKeys[fmt.Sprintf("%d:%d", v.UnitID, v.RegisterOffset)] = struct{}{}
+		}
+	}
+	// Ensure at least one entry per key remains (the latest), even if older than cutoff
+	for key, latest := range latestByKey {
+		if _, kept := keptKeys[key]; !kept {
+			cleanedValues = append(cleanedValues, latest)
+			keptKeys[key] = struct{}{}
 		}
 	}
 	values = cleanedValues
@@ -225,6 +248,21 @@ func (sc *ServerContext) UpdateRegister(unitID int, registerOffset int, value in
 		return
 	}
 
+	// Check for suspicious rollback: high value -> 0
+	key := fmt.Sprintf("%d:%d", unitID, registerOffset)
+	sc.prevValuesMu.RLock()
+	previousValue, hasPrevious := sc.previousValues[key]
+	sc.prevValuesMu.RUnlock()
+
+	if hasPrevious && previousValue > 1000 && value == 0 {
+		sc.logger.Warn("Suspicious register rollback detected: high value dropped to zero",
+			zap.Int("unitID", unitID),
+			zap.Int("offset", registerOffset),
+			zap.Int32("previous_value", previousValue),
+			zap.Int32("new_value", value),
+			zap.String("register_key", key))
+	}
+
 	slave.HR[registerOffset] = r1
 	slave.HR[registerOffset+1] = r2
 
@@ -233,6 +271,11 @@ func (sc *ServerContext) UpdateRegister(unitID int, registerOffset int, value in
 		sc.logger.Error("Error saving value",
 			zap.Error(err))
 	}
+
+	// Update previous value tracking
+	sc.prevValuesMu.Lock()
+	sc.previousValues[key] = value
+	sc.prevValuesMu.Unlock()
 
 	sc.logger.Info("Updated Modbus register",
 		zap.Int("unitID", unitID),

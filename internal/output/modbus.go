@@ -12,6 +12,14 @@ import (
 	"github.com/optech/protocol-bridge/pkg/message"
 )
 
+// min returns the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // ModbusOutput writes messages to a Modbus server's holding registers
 type ModbusOutput struct {
 	name      string
@@ -57,14 +65,27 @@ func (m *ModbusOutput) Send(ctx context.Context, msg *message.Message) error {
 					UnitID         string `json:"unitID"`
 				} `json:"attributes"`
 				TransformedPayload struct {
-					Liters int32 `json:"liters"`
+					Liters *int32 `json:"liters"` // Use pointer to detect missing/null values
 				} `json:"transformedPayload"`
 			} `json:"body"`
 		} `json:"message"`
 	}
 
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		m.logger.Debug("Failed to parse message payload, logging raw payload for debugging",
+			zap.String("raw_payload", string(msg.Payload)),
+			zap.Error(err))
 		return fmt.Errorf("failed to parse message payload: %w", err)
+	}
+
+	// Log the parsed liters value for debugging (especially for unit 21)
+	if payload.Message.Body.Attributes.UnitID == "21" {
+		m.logger.Debug("Parsed MQTT message for unit 21",
+			zap.String("deviceID", payload.Message.Header.DeviceID),
+			zap.String("unitID", payload.Message.Body.Attributes.UnitID),
+			zap.String("modbusRegister", payload.Message.Body.Attributes.ModbusRegister),
+			zap.Any("liters", payload.Message.Body.TransformedPayload.Liters),
+			zap.String("raw_payload_preview", string(msg.Payload)[:min(200, len(msg.Payload))]))
 	}
 
 	// Extract unitID - handle empty string
@@ -106,8 +127,21 @@ func (m *ModbusOutput) Send(ctx context.Context, msg *message.Message) error {
 		return nil
 	}
 
-	// Get liters value
-	liters := payload.Message.Body.TransformedPayload.Liters
+	// Get liters value - check if it's present (not missing/null)
+	if payload.Message.Body.TransformedPayload.Liters == nil {
+		m.logger.Error("Dropping message with missing/null liters value",
+			zap.String("deviceID", payload.Message.Header.DeviceID),
+			zap.Int("unitID", unitID),
+			zap.Int("register_offset", registerNum),
+			zap.String("raw_payload_preview", string(msg.Payload)[:min(500, len(msg.Payload))]))
+		// Drop the message to avoid overwriting valid register values with missing data
+		return nil
+	}
+
+	liters := *payload.Message.Body.TransformedPayload.Liters
+
+	// Note: We allow 0 values as they are valid readings (e.g., meter reset or actual zero consumption)
+	// Only missing/null values are rejected above
 
 	// Update the Modbus server's holding register
 	m.serverCtx.UpdateRegister(unitID, registerNum, liters)
