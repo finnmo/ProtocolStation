@@ -78,9 +78,17 @@ func (m *ModbusOutput) Send(ctx context.Context, msg *message.Message) error {
 		return fmt.Errorf("failed to parse message payload: %w", err)
 	}
 
-	// Log the parsed liters value for debugging (especially for unit 21)
+	// Log the parsed liters value for debugging (unit 21 and unit 22)
 	if payload.Message.Body.Attributes.UnitID == "21" {
 		m.logger.Debug("Parsed MQTT message for unit 21",
+			zap.String("deviceID", payload.Message.Header.DeviceID),
+			zap.String("unitID", payload.Message.Body.Attributes.UnitID),
+			zap.String("modbusRegister", payload.Message.Body.Attributes.ModbusRegister),
+			zap.Any("liters", payload.Message.Body.TransformedPayload.Liters),
+			zap.String("raw_payload_preview", string(msg.Payload)[:min(200, len(msg.Payload))]))
+	}
+	if payload.Message.Body.Attributes.UnitID == "22" {
+		m.logger.Debug("Parsed MQTT message for unit 22",
 			zap.String("deviceID", payload.Message.Header.DeviceID),
 			zap.String("unitID", payload.Message.Body.Attributes.UnitID),
 			zap.String("modbusRegister", payload.Message.Body.Attributes.ModbusRegister),
@@ -134,17 +142,29 @@ func (m *ModbusOutput) Send(ctx context.Context, msg *message.Message) error {
 			zap.Int("unitID", unitID),
 			zap.Int("register_offset", registerNum),
 			zap.String("raw_payload_preview", string(msg.Payload)[:min(500, len(msg.Payload))]))
-		// Drop the message to avoid overwriting valid register values with missing data
 		return nil
 	}
 
 	liters := *payload.Message.Body.TransformedPayload.Liters
 
-	// Note: We allow 0 values as they are valid readings (e.g., meter reset or actual zero consumption)
-	// Only missing/null values are rejected above
+	// Treat 0 as invalid - drop so we don't overwrite valid register values
+	if liters == 0 {
+		m.logger.Error("Dropping message with liters=0 (treated as invalid)",
+			zap.String("deviceID", payload.Message.Header.DeviceID),
+			zap.Int("unitID", unitID),
+			zap.Int("register_offset", registerNum))
+		return nil
+	}
 
 	// Update the Modbus server's holding register
 	m.serverCtx.UpdateRegister(unitID, registerNum, liters)
+
+	// Log when unit 22 is written so we can verify it's not stuck at 0
+	if unitID == 22 {
+		m.logger.Info("Unit 22 register written",
+			zap.Int32("liters", liters),
+			zap.Int("register_offset", registerNum))
+	}
 
 	m.logger.Info("Updated Modbus register from message",
 		zap.String("deviceID", payload.Message.Header.DeviceID),
