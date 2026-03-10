@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -142,22 +143,45 @@ func (m *MQTTOutput) Stop() error {
 	return nil
 }
 
-// Send sends a message to the MQTT broker
+// Send sends a message to the MQTT broker.
+// If the payload contains a "_topic" field it is used as the publish topic
+// (and stripped from the payload), otherwise m.config.Topic is used.
 func (m *MQTTOutput) Send(ctx context.Context, msg *message.Message) error {
 	if !m.IsConnected() {
 		return fmt.Errorf("MQTT client not connected")
 	}
 
-	// Publish only the transformed payload (already JSON from transformer)
 	if msg.Payload == nil {
 		return fmt.Errorf("message payload is empty")
 	}
 
+	// Resolve publish topic: prefer _topic field embedded in payload
+	publishTopic := m.config.Topic
+	payload := []byte(msg.Payload)
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &raw); err == nil {
+		if topicRaw, ok := raw["_topic"]; ok {
+			var t string
+			if err := json.Unmarshal(topicRaw, &t); err == nil && t != "" {
+				publishTopic = t
+				delete(raw, "_topic")
+				if stripped, err := json.Marshal(raw); err == nil {
+					payload = stripped
+				}
+			}
+		}
+	}
+
+	if publishTopic == "" {
+		return fmt.Errorf("no publish topic: set output topic in config or include _topic in payload")
+	}
+
 	token := m.client.Publish(
-		m.config.Topic,
+		publishTopic,
 		byte(m.config.QoS),
 		m.config.Retain,
-		[]byte(msg.Payload),
+		payload,
 	)
 
 	// Wait for completion with context timeout
@@ -172,7 +196,7 @@ func (m *MQTTOutput) Send(ctx context.Context, msg *message.Message) error {
 			return fmt.Errorf("failed to publish message: %w", err)
 		}
 		m.logger.Debug("message published",
-			zap.String("topic", m.config.Topic),
+			zap.String("topic", publishTopic),
 			zap.Int("qos", m.config.QoS),
 			zap.Bool("retain", m.config.Retain))
 		return nil

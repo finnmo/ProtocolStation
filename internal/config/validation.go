@@ -177,10 +177,8 @@ func validateConfig(cfg *Config) error {
 				clientIDs[output.ClientID] = true
 			}
 
-			// Validate topic
-			if output.Topic == "" {
-				v.addError(field+".topic", "", "output topic is required", "")
-			} else {
+			// Validate topic (optional: may be omitted when transformers supply _topic in payload)
+			if output.Topic != "" {
 				if err := validateTopic(output.Topic); err != nil {
 					v.addError(field+".topic", output.Topic, err.Error(), "")
 				}

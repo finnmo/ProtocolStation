@@ -60,7 +60,7 @@ pipelines:
     routes:
       - transformer: people-counter-transform
         outputs:
-          - aws-iot-output-people
+          - aws-iot-output
   - name: bridge-water-meter
     input: water-meter-input
     routes:
@@ -72,7 +72,7 @@ pipelines:
     routes:
       - transformer: car-counting-transform
         outputs:
-          - aws-iot-output-car
+          - aws-iot-output
           
 # Transformers with JavaScript support
 transformers:
@@ -81,6 +81,11 @@ transformers:
     script: |
       function transform(input, context) {
         var topic = context.topic || "";
+
+        // Exclude car-counting topics — handled by car-counting-transform
+        if (topic.includes("BEN-TCP2-Green")) {
+          return null;
+        }
 
         function parseNewTopicFormat(topic) {
           // Supports topics containing "Camera Name: <id>" and "Counter Name: <tag>-<direction>"
@@ -190,6 +195,7 @@ transformers:
         var thingName = deviceId + "-" + deviceTag;
 
         return {
+          _topic: "pfd/ot/peopleCounter/bosch5100i/raw",
           iotThingName: thingName,
           PayloadData: {
             provider: "MQTT-Bosch",
@@ -234,73 +240,70 @@ transformers:
         // Extract count from message
         var currentCount = input.Data && input.Data.Count ? input.Data.Count : 0;
         
+        // Daily reset: on first message after midnight, snapshot current totals as the
+        // day's base so daily deltas start from 0 each day
+        var today = new Date().toISOString().substring(0, 10);
+        var lastResetDate = state.get("lastResetDate") || "";
+        if (lastResetDate !== today) {
+          state.setAndSave("baseInbound", state.get("inbound") || 0);
+          state.setAndSave("baseOutbound", state.get("outbound") || 0);
+          state.setAndSave("lastResetDate", today);
+        }
+
         // Get previous counts from state
         var prevInbound = state.get("inbound") || 0;
         var prevOutbound = state.get("outbound") || 0;
-        
-        // Handle overflow detection
-        var newCount = currentCount;
+
+        // Handle overflow detection and update cumulative totals
         if (direction === "inbound") {
-          // Check for overflow: if new count < previous AND previous > threshold, reset occurred
-          if (newCount < prevInbound && prevInbound > OVERFLOW_THRESHOLD) {
-            // Overflow reset - use new count as-is
-            newCount = currentCount;
-          } else {
-            // Normal increment - use current count
-            newCount = currentCount;
+          if (currentCount < prevInbound && prevInbound > OVERFLOW_THRESHOLD) {
+            // Camera counter overflowed — adjust base so daily delta stays correct
+            state.setAndSave("baseInbound", state.get("baseInbound") - (prevInbound - currentCount));
           }
-          state.setAndSave("inbound", newCount);
+          state.setAndSave("inbound", currentCount);
         } else if (direction === "outbound") {
-          // Check for overflow: if new count < previous AND previous > threshold, reset occurred
-          if (newCount < prevOutbound && prevOutbound > OVERFLOW_THRESHOLD) {
-            // Overflow reset - use new count as-is
-            newCount = currentCount;
-          } else {
-            // Normal increment - use current count
-            newCount = currentCount;
+          if (currentCount < prevOutbound && prevOutbound > OVERFLOW_THRESHOLD) {
+            state.setAndSave("baseOutbound", state.get("baseOutbound") - (prevOutbound - currentCount));
           }
-          state.setAndSave("outbound", newCount);
+          state.setAndSave("outbound", currentCount);
         }
-        
-        // Get latest values (may have been updated above)
+
+        // Get latest cumulative values
         var inbound = state.get("inbound") || 0;
         var outbound = state.get("outbound") || 0;
-        
-        // Calculate occupied
-        var occupied = inbound - outbound;
+
+        // Daily deltas (cumulative minus start-of-day base)
+        var baseInbound = state.get("baseInbound") || 0;
+        var baseOutbound = state.get("baseOutbound") || 0;
+        var dailyInbound = Math.max(0, inbound - baseInbound);
+        var dailyOutbound = Math.max(0, outbound - baseOutbound);
+
+        // Calculate occupied (clamped to 0 — never negative)
+        var occupied = Math.max(0, inbound - outbound);
         
         // Output format matching AWS IoT expectations
         return {
-          iotThingName: "BEN-TCP2-Green-carCounter",
+          _topic: "pfd/ot/parking/bosch5100i/raw",
+          iotThingName: parts[0],
           PayloadData: {
             provider: "MQTT-Bosch",
             timestamp: input.UtcTime || new Date().toISOString(),
             inbound: inbound,
             outbound: outbound,
-            occupied: occupied
+            occupied: occupied,
+            dailyInbound: dailyInbound,
+            dailyOutbound: dailyOutbound
           }
         };
       }
       
 # Output destinations
 outputs:
-  - name: aws-iot-output-people
+  - name: aws-iot-output
     type: mqtt
     broker: tls://agi8wtqgu97at-ats.iot.ap-southeast-2.amazonaws.com:8883
-    client_id: protocol-bridge-aws-iot-people
-    topic: pfd/ot/peopleCounter/bosch5100i/raw
-    qos: 1
-    retain: false
-    username: ""
-    password: ""
-    cert_path: certs/output/aws-iot-ap-southeast-2/certificate.pem.crt
-    key_path: certs/output/aws-iot-ap-southeast-2/private.pem.key
-    ca_path: certs/output/aws-iot-ap-southeast-2/ca.pem
-  - name: aws-iot-output-car
-    type: mqtt
-    broker: tls://agi8wtqgu97at-ats.iot.ap-southeast-2.amazonaws.com:8883
-    client_id: protocol-bridge-aws-iot-car
-    topic: pfd/ot/peopleCounter/bosch5100i/raw
+    client_id: protocol-bridge-aws-iot
+    topic: ""
     qos: 1
     retain: false
     username: ""
