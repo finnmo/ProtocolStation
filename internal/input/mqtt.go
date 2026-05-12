@@ -41,8 +41,17 @@ func NewMQTTInput(cfg config.InputConfig, logger *zap.Logger) *MQTTInput {
 	}
 }
 
-// Start begins consuming messages from the MQTT broker
+// Start begins consuming messages from the MQTT broker.
+// Idempotent: if already started (client exists and is connected), returns nil immediately.
 func (m *MQTTInput) Start(ctx context.Context) error {
+	m.mu.Lock()
+	if m.client != nil && m.client.IsConnected() {
+		m.mu.Unlock()
+		m.logger.Debug("MQTT input already started, skipping", zap.String("name", m.name))
+		return nil
+	}
+	m.mu.Unlock()
+
 	m.ctx, m.cancel = context.WithCancel(ctx)
 
 	opts := mqtt.NewClientOptions()

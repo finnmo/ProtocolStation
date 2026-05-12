@@ -7,6 +7,10 @@ logs/
 *.log
 test-*.log
 modbus_registers.json
+register_values.json
+
+# Runtime transformer state
+state_*.json
 
 # Test files
 test-*.sh
