@@ -119,7 +119,7 @@ servers:
 inputs:
   - name: water-aws-input
     type: mqtt
-    broker: tls://agi8wtqgu97at-ats.iot.ap-southeast-2.amazonaws.com:8883
+    broker: tls://a2ucaobdsgkqr9-ats.iot.ap-southeast-2.amazonaws.com:8883
     client_id: protocol-bridge-water
     topics:
       - pfd/ot/water

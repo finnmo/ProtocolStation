@@ -16,112 +16,287 @@ servers:
     enabled: true
     address: ":502"
     persistence_file: "register_values.json"
-  - name: bacnet-server
-    type: bacnet
-    enabled: false
-    address: ":47808"
-    device_instances: [12345, 12346]
 
 # Input sources
 inputs:
-  - name: bacnet-input
-    type: bacnet
-    # cov: { enabled: true, lifetime_sec: 300, fallback_poll_sec: 60 }
-  - name: sensor-input
+  - name: people-counter-input
     type: mqtt
     broker: localhost:1883
-    client_id: bridge-input-1
+    client_id: bridge-people-counter
     topics:
-      - sensors/temperature
-      - sensors/humidity
+      - "#"
     qos: 1
     username: ""
     password: ""
-  - name: water-aws-input
+  - name: water-meter-input
     type: mqtt
-    broker: tls://agi8wtqgu97at-ats.iot.ap-southeast-2.amazonaws.com:8883
-    client_id: protocol-bridge-water
+    broker: tls://<aws-iot-endpoint>:8883
+    client_id: protocol-bridge-water-meter
     topics:
-      - pfd/ot/water
+      - pfd/ot/water/em300di
     qos: 1
     username: ""
     password: ""
     cert_path: certs/input/aws-iot-ap-southeast-2/certificate.pem.crt
     key_path: certs/input/aws-iot-ap-southeast-2/private.pem.key
     ca_path: certs/input/aws-iot-ap-southeast-2/ca.pem
+  - name: gas-meter-input
+    type: mqtt
+    broker: tls://<aws-iot-endpoint>:8883
+    client_id: protocol-bridge-gas-meter
+    topics:
+      - pfd/ot/gas/em300di
+    qos: 1
+    username: ""
+    password: ""
+    cert_path: certs/input/aws-iot-ap-southeast-2/certificate.pem.crt
+    key_path: certs/input/aws-iot-ap-southeast-2/private.pem.key
+    ca_path: certs/input/aws-iot-ap-southeast-2/ca.pem
+  - name: car-counting-input
+    type: mqtt
+    broker: localhost:1883
+    client_id: bridge-car-counting
+    topics:
+      - "BEN-TCP2-LZ-Green/onvif-ej/RuleEngine/CountAggregation/Counter/&1/Inbound"
+      - "BEN-TCP2-LZ-Green/onvif-ej/RuleEngine/CountAggregation/Counter/&1/Outbound"
+      - "BEN-TCP1-LZ-Green/onvif-ej/RuleEngine/CountAggregation/Counter/&1/Inbound"
+      - "BEN-TCP1-LZ-Green/onvif-ej/RuleEngine/CountAggregation/Counter/&1/Outbound"
+    qos: 1
+    username: ""
+    password: ""
 
 # Transformation pipelines (1 input -> many outputs)
 pipelines:
-  - name: sensor-pipeline
-    input: sensor-input
+  - name: people-counter-pipeline
+    input: people-counter-input
     routes:
-      - transformer: temperature-transform
+      - transformer: people-counter-transform
         outputs:
-          - temp-output
-      - transformer: humidity-transform
-        outputs:
-          - humidity-output
-          - backup-output
-  - name: water-modbus-pipeline
-    input: water-aws-input
+          - aws-iot-output
+  - name: bridge-water-meter
+    input: water-meter-input
     routes:
-      - transformer: water-pass-through
+      - transformer: water-meter-passthrough
         outputs:
-          - water-modbus-output
+          - water-meter-modbus-output
+  - name: bridge-gas-meter
+    input: gas-meter-input
+    routes:
+      - transformer: gas-meter-transform
+        outputs:
+          - gas-meter-modbus-output
+  - name: car-counting-pipeline
+    input: car-counting-input
+    routes:
+      - transformer: car-counting-transform
+        outputs:
+          - aws-iot-output
 
 # Transformers with JavaScript support
 transformers:
-  - name: temperature-transform
+  - name: people-counter-transform
+    type: javascript
+    script: |
+      function transform(input, context) {
+        var topic = context.topic || "";
+
+        if (/BEN-TCP\d+-LZ-Green/.test(topic)) {
+          return null;
+        }
+
+        function parseNewTopicFormat(topic) {
+          var cameraName = null;
+          var counterName = null;
+          var segments = topic.split("/");
+          for (var i = 0; i < segments.length; i++) {
+            var seg = segments[i].trim();
+            var camMatch = seg.match(/^Camera Name:\s*(.+)$/i);
+            if (camMatch && camMatch[1]) { cameraName = camMatch[1].trim(); continue; }
+            var ctrMatch = seg.match(/^Counter Name:\s*(.+)$/i);
+            if (ctrMatch && ctrMatch[1]) { counterName = ctrMatch[1].trim(); continue; }
+          }
+          if (!cameraName && segments.length > 0) cameraName = segments[0].trim();
+          if (!counterName) return null;
+          var direction = null;
+          var tagPart = counterName;
+          var hyphenIndex = counterName.lastIndexOf("-");
+          if (hyphenIndex > -1) {
+            var possibleDir = counterName.substring(hyphenIndex + 1).toLowerCase();
+            if (possibleDir === "inbound" || possibleDir === "outbound") {
+              direction = possibleDir;
+              tagPart = counterName.substring(0, hyphenIndex);
+            }
+          }
+          return { deviceId: cameraName, deviceTag: tagPart.trim(), direction: direction };
+        }
+
+        var isNewFormat = /Counter Name:/i.test(topic) || /Camera Name:/i.test(topic);
+        var deviceId = null, deviceTag = null, direction = null;
+
+        if (isNewFormat) {
+          var parsed = parseNewTopicFormat(topic);
+          if (parsed) { deviceId = parsed.deviceId; deviceTag = parsed.deviceTag; direction = parsed.direction; }
+        }
+
+        if (!deviceId || !direction) {
+          if (!topic.includes("onvif-ej/RuleEngine/CountAggregation/Counter")) {
+            if (!isNewFormat) return null;
+          } else {
+            var parts = topic.split("/");
+            deviceId = deviceId || parts[0];
+            var lastSegment = parts[parts.length - 1];
+            var dirTagMatch = lastSegment.match(/^(.+?)-(inbound|outbound)$/i);
+            if (dirTagMatch) {
+              if (!direction) direction = dirTagMatch[2].toLowerCase();
+              if (!deviceTag) deviceTag = dirTagMatch[1].trim();
+            } else {
+              var words = lastSegment.split(/\s+/);
+              var lastWord = words[words.length - 1].toLowerCase();
+              if (lastWord === "inbound" || lastWord === "outbound") {
+                if (!direction) direction = lastWord;
+                if (!deviceTag && words.length > 1) deviceTag = words.slice(0, -1).join("");
+              }
+            }
+          }
+        }
+
+        if (!deviceId || !direction) {
+          console.log("Could not parse topic: " + topic);
+          return null;
+        }
+
+        var thingName = deviceTag ? deviceId + "-" + deviceTag : deviceId;
+        var payloadData = { provider: "MQTT-Bosch", timestamp: input.UtcTime };
+        payloadData[direction] = parseInt(input.Data.Count, 10);
+
+        return {
+          _topic: "pfd/ot/peopleCounter/bosch5100i/raw",
+          iotThingName: thingName,
+          PayloadData: payloadData
+        };
+      }
+  - name: car-counting-transform
+    type: javascript
+    script: |
+      function transform(input, context) {
+        var topic = context.topic;
+        var OVERFLOW_THRESHOLD = 1000000000;
+
+        // ── Zone capacity (total spaces per camera/zone) ───────────────────
+        var CAPACITY_MAP = {
+          "BEN-TCP1-LZ-Green": 104,
+          "BEN-TCP2-LZ-Green": 241
+        };
+        // ──────────────────────────────────────────────────────────────────
+
+        if (!topic.includes("onvif-ej/RuleEngine/CountAggregation/Counter")) {
+          return null;
+        }
+
+        var parts = topic.split("/");
+        var cameraName = parts[0];
+        var lastSegment = parts[parts.length - 1];
+        var direction = null;
+
+        if (lastSegment.includes("Inbound")) {
+          direction = "inbound";
+        } else if (lastSegment.includes("Outbound")) {
+          direction = "outbound";
+        } else {
+          return null;
+        }
+
+        var total = CAPACITY_MAP[cameraName];
+        if (total === undefined) {
+          return null;
+        }
+
+        var prefix = cameraName + "_";
+        var currentCount = input.Data && input.Data.Count ? parseInt(input.Data.Count, 10) : 0;
+
+        var today = new Date().toISOString().substring(0, 10);
+        var lastResetDate = state.get(prefix + "lastResetDate") || "";
+        if (lastResetDate !== today) {
+          state.setAndSave(prefix + "baseInbound", state.get(prefix + "inbound") || 0);
+          state.setAndSave(prefix + "baseOutbound", state.get(prefix + "outbound") || 0);
+          state.setAndSave(prefix + "lastResetDate", today);
+        }
+
+        var prevInbound = state.get(prefix + "inbound") || 0;
+        var prevOutbound = state.get(prefix + "outbound") || 0;
+
+        if (direction === "inbound") {
+          if (currentCount < prevInbound && prevInbound > OVERFLOW_THRESHOLD) {
+            state.setAndSave(prefix + "baseInbound", state.get(prefix + "baseInbound") - (prevInbound - currentCount));
+          }
+          state.setAndSave(prefix + "inbound", currentCount);
+        } else {
+          if (currentCount < prevOutbound && prevOutbound > OVERFLOW_THRESHOLD) {
+            state.setAndSave(prefix + "baseOutbound", state.get(prefix + "baseOutbound") - (prevOutbound - currentCount));
+          }
+          state.setAndSave(prefix + "outbound", currentCount);
+        }
+
+        var inbound = state.get(prefix + "inbound") || 0;
+        var outbound = state.get(prefix + "outbound") || 0;
+        var baseInbound = state.get(prefix + "baseInbound") || 0;
+        var baseOutbound = state.get(prefix + "baseOutbound") || 0;
+        var occupied = Math.max(0, inbound - outbound);
+
+        return {
+          _topic: "pfd/ot/parking/bosch5100i/raw",
+          iotThingName: cameraName,
+          PayloadData: {
+            provider: "MQTT-Bosch",
+            timestamp: input.UtcTime || new Date().toISOString(),
+            inbound: inbound,
+            outbound: outbound,
+            occupied: occupied,
+            vacant: Math.max(0, total - occupied),
+            total: total,
+            dailyInbound: Math.max(0, inbound - baseInbound),
+            dailyOutbound: Math.max(0, outbound - baseOutbound)
+          }
+        };
+      }
+  - name: water-meter-passthrough
     type: javascript
     script: |
       function transform(input) {
-        return {
-          device_id: input.device,
-          value: parseFloat(input.temp),
-          unit: "celsius",
-          timestamp: new Date().toISOString()
-        };
+        return input;
       }
-  - name: humidity-transform
+  - name: gas-meter-transform
     type: javascript
     script: |
       function transform(input) {
-        return {
-          sensor: input.device,
-          humidity_pct: input.humidity,
-          recorded_at: Date.now()
-        };
+        // Gas device reports volume as m3; ModbusOutput expects liters.
+        if (input && input.message && input.message.body && input.message.body.transformedPayload) {
+          var m3 = input.message.body.transformedPayload.m3;
+          if (m3 !== undefined && m3 !== null) {
+            input.message.body.transformedPayload.liters = m3;
+          }
+        }
+        return input;
       }
-  - name: water-pass-through
-    type: javascript
-    script: |
-      function transform(input) { return input; }
 
 # Output destinations
 outputs:
-  - name: bacnet-output
-    type: bacnet
-    server: bacnet-server
-  - name: temp-output
+  - name: aws-iot-output
     type: mqtt
-    broker: localhost:1883
-    client_id: bridge-output-temp
-    topic: processed/temperature
+    broker: tls://<aws-iot-endpoint>:8883
+    client_id: protocol-bridge-aws-iot
+    topic: ""
     qos: 1
     retain: false
     username: ""
     password: ""
-  - name: humidity-output
-    type: mqtt
-    broker: localhost:1883
-    client_id: bridge-output-humidity
-    topic: processed/humidity
-    qos: 1
-  - name: backup-output
-    type: mqtt
-    broker: localhost:1883
-    topic: backup/all
-  - name: water-modbus-output
+    cert_path: certs/output/aws-iot-ap-southeast-2/certificate.pem.crt
+    key_path: certs/output/aws-iot-ap-southeast-2/private.pem.key
+    ca_path: certs/output/aws-iot-ap-southeast-2/ca.pem
+  - name: water-meter-modbus-output
+    type: modbus
+    server: modbus-server
+  - name: gas-meter-modbus-output
     type: modbus
     server: modbus-server
 
@@ -138,15 +313,15 @@ error_handling:
     type: mqtt
     broker: localhost:1883
     topic: dlq/failed-messages
-    max_size: 100    # Maximum DLQ size in MB before refusing new messages
-    alert_size: 50   # Alert when DLQ reaches this size in MB
+    max_size: 100
+    alert_size: 50
 
 # Logging with rotation support
 logging:
   level: info
   format: json
   file: logs/bridge.log
-  max_size: 100      # Max log file size in MB
-  max_age: 7         # Max age of log files in days
-  max_backups: 5     # Maximum number of log files to keep
-  compress: true     # Compress old log files
+  max_size: 100
+  max_age: 7
+  max_backups: 5
+  compress: true
