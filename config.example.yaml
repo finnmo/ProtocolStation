@@ -245,10 +245,10 @@ transformers:
 
         return {
           _topic: "pfd/ot/parking/bosch5100i/raw",
+          acquisitionTimestamp: input.UtcTime || new Date().toISOString(),
           iotThingName: cameraName,
-          PayloadData: {
+          payloadData: {
             provider: "MQTT-Bosch",
-            timestamp: input.UtcTime || new Date().toISOString(),
             inbound: inbound,
             outbound: outbound,
             occupied: occupied,
