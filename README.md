@@ -8,8 +8,9 @@ Think of it as a central station: messages arrive from different "lines" (inputs
 
 - **MQTT input/output** with auto-reconnect (subscriptions restored on reconnect)
 - **Modbus TCP server** on port 502 by default, 32-bit SINT values stored big‑endian across 2 holding registers
-- **JavaScript transformers** for payload shaping
-- **1→N routing**, retries, DLQ, and hosted server management
+- **JavaScript transformers** for payload shaping, with persistent state across messages
+- **1→N routing**, retries, DLQ, circuit breaker, and hosted server management
+- **HTTP API** on port 8080 — `/health`, `/ready`, `/status`, `/metrics` (Prometheus)
 - **Structured logging** with rotation; includes Modbus poll logs (FC03) and startup details
 
 ## Quick Start
@@ -276,30 +277,43 @@ mbpoll -m tcp -a 5 -r 3020 -c 2 127.0.0.1 502
 
 ```
 /
-├── cmd/bridge/           # Main application
+├── cmd/
+│   ├── bridge/          # Main binary
+│   └── encrypt-value/   # CLI tool to encrypt config values
 ├── internal/
-│   ├── config/          # Configuration parsing
-│   ├── input/           # Input implementations
-│   ├── transformer/      # Transformer implementations
-│   ├── output/          # Output implementations
-│   ├── pipeline/        # Pipeline orchestration
-│   ├── retry/           # Retry and DLQ logic
-│   └── server/          # Server management
-├── pkg/message/         # Common message types
-└── config.example.yaml  # Example configuration
+│   ├── config/          # Configuration parsing and validation
+│   ├── health/          # Health/readiness checks, disk space monitor
+│   ├── input/           # Input implementations (MQTT)
+│   ├── logging/         # Structured logger setup with rotation
+│   ├── metrics/         # Prometheus metrics
+│   ├── output/          # Output implementations (MQTT, Modbus)
+│   ├── pipeline/        # Pipeline orchestration, circuit breaker
+│   ├── retry/           # Retry manager and DLQ
+│   ├── security/        # AES-256-GCM encryption for config secrets
+│   ├── server/          # HTTP API server, server lifecycle manager
+│   │   ├── modbus/      # Modbus TCP server
+│   │   └── bacnet/      # BACnet (stub, disabled)
+│   ├── shutdown/        # Graceful shutdown coordination
+│   └── transformer/     # JavaScript transformer + file-based state
+├── .github/workflows/   # CI (build, vet, race-detected tests)
+├── deploy/
+│   ├── systemd/         # Systemd service file
+│   └── windows/         # NSSM installer scripts (windows-deployment branch)
+├── pkg/message/         # Shared message type
+└── config.example.yaml  # Configuration template
 ```
 
 ### Building
 
 ```bash
-# Build the application
-go build ./cmd/bridge
+# Build (Linux)
+make build
 
-# Run tests
-go test ./...
+# Build + set CAP_NET_BIND_SERVICE (required for port 502)
+make build-install
 
-# Run with race detection
-go test -race ./...
+# Run tests (race detector enabled)
+go test -race -timeout 60s ./...
 ```
 
 ## License

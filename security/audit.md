@@ -30,24 +30,23 @@ This document tracks security practices, audits, and findings for the Protocol B
 
 ## Vulnerability Scanning
 
-### Automated Scanning
+### Automated (CI)
 
-We use automated vulnerability scanning in CI/CD:
+The CI workflow (`.github/workflows/ci.yml`) runs on every push and PR:
 
-- **govulncheck**: Scans for known vulnerabilities in Go dependencies
-- **go mod verify**: Verifies dependency integrity
-- **Weekly Scheduled Runs**: Automatic scanning every Monday
+- **go vet** — detects common correctness issues
+- **go test -race** — catches data races
 
 ### Manual Scanning
 
-To run security checks locally:
+Run periodically before releases:
 
 ```bash
-# Check for vulnerabilities
+# Check for known vulnerabilities in dependencies
 go install golang.org/x/vuln/cmd/govulncheck@latest
 govulncheck ./...
 
-# Verify dependencies
+# Verify dependency checksums
 go mod verify
 ```
 
@@ -55,7 +54,7 @@ go mod verify
 
 ### Current Status: No Critical Vulnerabilities
 
-Last audit: [Current Date]
+Last audit: 2026-08-06
 
 ### Known Dependencies
 
