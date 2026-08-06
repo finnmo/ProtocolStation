@@ -27,6 +27,7 @@ type MQTTInput struct {
 	logger    *zap.Logger
 	connected bool
 	mu        sync.RWMutex
+	closeOnce sync.Once
 	ctx       context.Context
 	cancel    context.CancelFunc
 }
@@ -43,6 +44,7 @@ func NewMQTTInput(cfg config.InputConfig, logger *zap.Logger) *MQTTInput {
 
 // Start begins consuming messages from the MQTT broker.
 // Idempotent: if already started (client exists and is connected), returns nil immediately.
+// Subscriptions are managed entirely by onConnect, which fires on initial connect and every reconnect.
 func (m *MQTTInput) Start(ctx context.Context) error {
 	m.mu.Lock()
 	if m.client != nil && m.client.IsConnected() {
@@ -84,7 +86,7 @@ func (m *MQTTInput) Start(ctx context.Context) error {
 			zap.String("cert", m.config.CertPath))
 	}
 
-	// Connection handlers
+	// onConnect handles all topic subscriptions — both initial connect and reconnects.
 	opts.SetOnConnectHandler(m.onConnect)
 	opts.SetConnectionLostHandler(m.onConnectionLost)
 
@@ -92,17 +94,6 @@ func (m *MQTTInput) Start(ctx context.Context) error {
 
 	if token := m.client.Connect(); token.Wait() && token.Error() != nil {
 		return fmt.Errorf("failed to connect to MQTT broker: %w", token.Error())
-	}
-
-	// Subscribe to topics
-	for _, topic := range m.config.Topics {
-		if token := m.client.Subscribe(topic, byte(m.config.QoS), m.messageHandler); token.Wait() && token.Error() != nil {
-			m.logger.Error("failed to subscribe to topic",
-				zap.String("topic", topic),
-				zap.Error(token.Error()))
-			return fmt.Errorf("failed to subscribe to topic %s: %w", topic, token.Error())
-		}
-		m.logger.Info("subscribed to topic", zap.String("topic", topic))
 	}
 
 	return nil
@@ -115,7 +106,6 @@ func (m *MQTTInput) Stop() error {
 	}
 
 	if m.client != nil && m.client.IsConnected() {
-		// Unsubscribe from all topics
 		for _, topic := range m.config.Topics {
 			if token := m.client.Unsubscribe(topic); token.Wait() && token.Error() != nil {
 				m.logger.Error("failed to unsubscribe from topic",
@@ -126,7 +116,9 @@ func (m *MQTTInput) Stop() error {
 		m.client.Disconnect(250)
 	}
 
-	close(m.messages)
+	m.closeOnce.Do(func() {
+		close(m.messages)
+	})
 	return nil
 }
 
@@ -147,24 +139,21 @@ func (m *MQTTInput) IsConnected() bool {
 	return m.connected && m.client != nil && m.client.IsConnected()
 }
 
-// onConnect handles MQTT connection events
-// CRITICAL ensures subscriptions are restored on reconnect
-
+// onConnect handles MQTT connection events and subscribes to all configured topics.
+// Called on initial connect and after every reconnect, so subscriptions are always restored.
 func (m *MQTTInput) onConnect(client mqtt.Client) {
 	m.mu.Lock()
 	m.connected = true
 	m.mu.Unlock()
 	m.logger.Info("connected to MQTT broker", zap.String("broker", m.config.Broker))
 
-	// Resubscribe to all topics after reconnection
-	// This is critical because MQTT subscriptions are lost on disconnect
 	for _, topic := range m.config.Topics {
 		if token := client.Subscribe(topic, byte(m.config.QoS), m.messageHandler); token.Wait() && token.Error() != nil {
-			m.logger.Error("failed to resubscribe to topic after reconnection",
+			m.logger.Error("failed to subscribe to topic",
 				zap.String("topic", topic),
 				zap.Error(token.Error()))
 		} else {
-			m.logger.Info("resubscribed to topic after reconnection", zap.String("topic", topic))
+			m.logger.Info("subscribed to topic", zap.String("topic", topic))
 		}
 	}
 }
@@ -235,11 +224,8 @@ func (m *MQTTInput) createTLSConfig() (*tls.Config, error) {
 		return nil, fmt.Errorf("failed to load certificate: %w", err)
 	}
 
-	// Create TLS configuration
-	tlsConfig := &tls.Config{
+	return &tls.Config{
 		RootCAs:      caCertPool,
 		Certificates: []tls.Certificate{cert},
-	}
-
-	return tlsConfig, nil
+	}, nil
 }
