@@ -17,7 +17,7 @@ state_*.json
 test-*.sh
 demo.sh
 config.yaml
-encrypt-value
+/encrypt-value
 
 # Go
 *.test
