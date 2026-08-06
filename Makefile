@@ -56,6 +56,11 @@ setcap:
 		exit 1; \
 	fi
 
+build-windows:
+	@echo "Building bridge for Windows (amd64)..."
+	GOOS=windows GOARCH=amd64 $(GOBUILD) -o bridge.exe ./cmd/bridge
+	@echo "✅ bridge.exe ready for deployment"
+
 build-encrypt:
 	@echo "Building encrypt-value tool..."
 	$(GOBUILD) ./cmd/encrypt-value
