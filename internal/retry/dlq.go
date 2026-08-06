@@ -3,6 +3,7 @@ package retry
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"go.uber.org/zap"
 
@@ -16,6 +17,7 @@ type DLQManager struct {
 	config         config.DLQConfig
 	output         output.Output
 	logger         *zap.Logger
+	mu             sync.Mutex // protects messageCount and totalBytes
 	messageCount   int64
 	totalBytes     int64
 	alertThreshold int64
@@ -86,20 +88,25 @@ func (d *DLQManager) SendToDLQ(ctx context.Context, msg *message.Message, err er
 	msgJSON, _ := msg.ToJSON()
 	msgSize := int64(len(msgJSON))
 
-	// Check DLQ size limits
+	// Check and update DLQ size limits under lock
+	d.mu.Lock()
 	d.totalBytes += msgSize
-	if d.totalBytes > int64(d.config.MaxSize)*1024*1024 {
+	exceeded := d.totalBytes > int64(d.config.MaxSize)*1024*1024
+	needAlert := d.totalBytes > d.alertThreshold && d.totalBytes-msgSize <= d.alertThreshold
+	totalBytes := d.totalBytes
+	d.mu.Unlock()
+
+	if exceeded {
 		d.logger.Error("DLQ size limit exceeded",
-			zap.Int64("total_bytes", d.totalBytes),
+			zap.Int64("total_bytes", totalBytes),
 			zap.Int64("limit", int64(d.config.MaxSize)*1024*1024),
 			zap.Int64("message_count", d.messageCount))
-		return fmt.Errorf("DLQ size limit exceeded: %d bytes", d.totalBytes)
+		return fmt.Errorf("DLQ size limit exceeded: %d bytes", totalBytes)
 	}
 
-	// Alert if approaching limit
-	if d.totalBytes > d.alertThreshold && d.totalBytes-msgSize <= d.alertThreshold {
+	if needAlert {
 		d.logger.Warn("DLQ approaching size limit",
-			zap.Int64("total_bytes", d.totalBytes),
+			zap.Int64("total_bytes", totalBytes),
 			zap.Int64("alert_threshold", d.alertThreshold),
 			zap.Int("max_size_mb", d.config.MaxSize))
 	}
@@ -121,15 +128,18 @@ func (d *DLQManager) SendToDLQ(ctx context.Context, msg *message.Message, err er
 		return dlqErr
 	}
 
+	d.mu.Lock()
 	d.messageCount++
+	logCount := d.messageCount
+	d.mu.Unlock()
 
 	// Only log every 10th message to avoid log spam
-	if d.messageCount%10 == 0 {
+	if logCount%10 == 0 {
 		d.logger.Info("message sent to DLQ",
 			zap.String("message_id", msg.ID),
 			zap.String("topic", msg.Topic),
-			zap.Int64("dlq_count", d.messageCount),
-			zap.Int64("dlq_bytes", d.totalBytes),
+			zap.Int64("dlq_count", logCount),
+			zap.Int64("dlq_bytes", totalBytes),
 			zap.Error(err))
 	}
 

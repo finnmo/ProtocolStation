@@ -113,7 +113,10 @@ func (j *JavaScriptTransformer) Transform(ctx context.Context, msg *message.Mess
 		})
 
 		// Execute the transformation script
-		vm.RunString(j.config.Script)
+		if _, err := vm.RunString(j.config.Script); err != nil {
+			done <- fmt.Errorf("failed to compile transformer script: %w", err)
+			return
+		}
 
 		// Call the transform function
 		transformFn, ok := goja.AssertFunction(vm.Get("transform"))

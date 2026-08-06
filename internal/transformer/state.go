@@ -66,16 +66,12 @@ func (s *StateStorage) Load() error {
 	return nil
 }
 
-// Save writes state to file
-func (s *StateStorage) Save() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
+// save writes state to disk. Caller must hold s.mu (write lock).
+func (s *StateStorage) save() error {
 	if !s.dirty {
-		return nil // No changes to save
+		return nil
 	}
 
-	// Ensure directory exists
 	if err := os.MkdirAll(filepath.Dir(s.filePath), 0755); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
@@ -96,6 +92,13 @@ func (s *StateStorage) Save() error {
 	return nil
 }
 
+// Save writes state to file
+func (s *StateStorage) Save() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.save()
+}
+
 // Get retrieves a value from state
 func (s *StateStorage) Get(key string) (interface{}, bool) {
 	s.mu.RLock()
@@ -113,12 +116,15 @@ func (s *StateStorage) Set(key string, value interface{}) error {
 	return nil
 }
 
-// SetAndSave stores a value and immediately saves to disk
+// SetAndSave stores a value and immediately saves to disk in a single atomic operation.
+// Holds the write lock across both the map update and the file write so no
+// concurrent Get/Set can observe a partial update.
 func (s *StateStorage) SetAndSave(key string, value interface{}) error {
-	if err := s.Set(key, value); err != nil {
-		return err
-	}
-	return s.Save()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data[key] = value
+	s.dirty = true
+	return s.save()
 }
 
 // GetAll returns a copy of all state data
@@ -152,4 +158,3 @@ func (s *StateStorage) AutoSave(interval time.Duration, stopCh <-chan struct{}) 
 		}
 	}
 }
-
