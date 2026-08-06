@@ -2,48 +2,45 @@
 
 ## Current Deployment Method
 
-### Manual Start (Current)
-The bridge is currently deployed using the manual start script:
+The bridge runs as the **systemd service** `protocol-bridge` on the `optech` account.
+
+```bash
+# Quick-rebuild and restart (builds, setcap, restarts service)
+./restart-bridge.sh
+
+# Manual rebuild cycle
+make build
+sudo setcap 'cap_net_bind_service=+ep' ./bridge
+sudo systemctl restart protocol-bridge
+```
+
+### Monitor the Bridge
+
+```bash
+# View live logs (bridge writes to file, not journald)
+tail -f logs/bridge.log
+
+# Service status
+sudo systemctl status protocol-bridge
+
+# Health / readiness / pipeline counters
+curl http://localhost:8080/health
+curl http://localhost:8080/ready
+curl http://localhost:8080/status | jq .
+
+# Prometheus metrics
+curl http://localhost:8080/metrics
+```
+
+### Manual Start (development / fallback)
 
 ```bash
 ./start-bridge.sh
 ```
 
-This will:
-- Stop any existing bridge instances
-- Start the MQTT server (if needed)
-- Start the Modbus server
-- Launch the bridge in the background
-
-### Monitor the Bridge
-
-```bash
-# View live logs
-tail -f logs/bridge.log
-
-# Check if bridge is running
-ps aux | grep "bridge -config"
-
-# View metrics
-curl http://localhost:8080/metrics
-
-# Check health
-curl http://localhost:8080/health
-
-# View status
-curl http://localhost:8080/status | jq .
-```
-
-### Stop the Bridge
-
-```bash
-pkill -f "./bridge"
-docker-compose -f mqtt/server/docker-compose.yml down
-```
-
 ---
 
-## Production Deployment (Systemd Service)
+## Systemd Service
 
 To run as a systemd service that auto-starts on boot:
 
@@ -111,7 +108,7 @@ sudo systemctl daemon-reload
 - **Working Directory**: /home/optech/ProtocolBridge
 - **Config File**: /home/optech/ProtocolBridge/config.yaml
 - **Log Location**: /home/optech/ProtocolBridge/logs/bridge.log
-- **Persistence File**: /home/optech/ProtocolBridge/modbus_registers.json
+- **Persistence File**: /home/optech/ProtocolBridge/register_values.json
 
 ---
 
@@ -138,7 +135,7 @@ The bridge includes automatic features for long-term unattended operation:
 | Production-ready | ⚠️ | ✅ |
 | Log rotation | ✅ | ✅ |
 | Auto-recovery | ✅ | ✅ |
-| Current setup | ✅ | ⏳ |
+| Current setup | fallback only | ✅ (primary) |
 
 ---
 

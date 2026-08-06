@@ -290,27 +290,26 @@ kubectl apply -f deploy/kubernetes/
 
 ### Installation
 
-1. **Copy files:**
+1. **Build and copy the service file:**
 
 ```bash
-sudo cp bridge /usr/local/bin/
+make build
 sudo cp deploy/systemd/protocol-bridge.service /etc/systemd/system/
-sudo mkdir -p /etc/protocol-bridge
 ```
 
-2. **Create configuration:**
+2. **Set capabilities for port 502:**
 
 ```bash
-sudo cp config.yaml /etc/protocol-bridge/
-sudo mkdir -p /etc/protocol-bridge/certs
-sudo cp -r certs/* /etc/protocol-bridge/certs/
+sudo setcap 'cap_net_bind_service=+ep' ./bridge
+# Must be re-run after every rebuild
 ```
 
-3. **Set permissions:**
+3. **Place config and certs:**
 
 ```bash
-sudo chmod 600 /etc/protocol-bridge/config.yaml
-sudo chmod 600 /etc/protocol-bridge/certs/*
+# config.yaml is gitignored — copy/edit from config.example.yaml
+cp config.example.yaml config.yaml
+# Place TLS certs under certs/input/ and certs/output/
 ```
 
 4. **Enable and start:**
@@ -324,34 +323,46 @@ sudo systemctl status protocol-bridge
 
 ### Service File
 
-**deploy/systemd/protocol-bridge.service:**
+The actual service file at `deploy/systemd/protocol-bridge.service`:
 
 ```ini
 [Unit]
-Description=Protocol Bridge
+Description=Protocol Bridge - IoT Message Protocol Bridge
 After=network.target
+Wants=network-online.target
 
 [Service]
-Type=simple
-User=bridge
-Group=bridge
-WorkingDirectory=/etc/protocol-bridge
-ExecStart=/usr/local/bin/bridge -config /etc/protocol-bridge/config.yaml
+Type=notify
+NotifyAccess=all
+User=optech
+Group=optech
+WorkingDirectory=/home/optech/ProtocolBridge
+ExecStart=/home/optech/ProtocolBridge/bridge -config /home/optech/ProtocolBridge/config.yaml
 Restart=always
 RestartSec=5
-StandardOutput=journal
-StandardError=journal
 
 # Security settings
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/etc/protocol-bridge
+
+# Logging — appended to rotating file, not journald
+StandardOutput=append:/home/optech/ProtocolBridge/logs/bridge.log
+StandardError=append:/home/optech/ProtocolBridge/logs/bridge.log
+SyslogIdentifier=protocol-bridge
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+TimeoutStopSec=30
+KillMode=mixed
+KillSignal=SIGTERM
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+> **Port 502 note:** `NoNewPrivileges=true` prevents runtime `setcap`. To bind port 502, run `sudo setcap 'cap_net_bind_service=+ep' ./bridge` after every build, or change to `NoNewPrivileges=false` with `AmbientCapabilities=CAP_NET_BIND_SERVICE`.
 
 ### Logs
 

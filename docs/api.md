@@ -18,6 +18,7 @@ The Protocol Bridge exposes HTTP endpoints on port 8080 by default:
 - **Base URL:** `http://localhost:8080`
 - **Health check:** `/health` - Liveness probe
 - **Readiness check:** `/ready` - Readiness probe
+- **Pipeline status:** `/status` - Message counts per pipeline
 - **Metrics:** `/metrics` - Prometheus metrics
 
 ---
@@ -62,25 +63,21 @@ Readiness probe for Kubernetes/Docker readiness checks.
 {
   "status": "ready",
   "components": {
-    "inputs": {
-      "people-counter-input": "connected"
-    },
-    "outputs": {
-      "aws-iot-output": "connected"
-    },
-    "pipelines": {
-      "people-counter-pipeline": "running"
-    }
+    "inputs.people-counter-input": { "status": "connected" },
+    "outputs.aws-iot-output-people": { "status": "connected" },
+    "pipelines.people-counter-pipeline": { "status": "connected" }
   },
   "timestamp": "2025-01-28T12:00:00Z"
 }
 ```
 
+Component keys use dotted notation: `inputs.<name>`, `outputs.<name>`, `pipelines.<name>`. Each value is an object with a `status` field and an optional `error` string.
+
 **Component Status:**
 - `connected` - Active and working
 - `connecting` - Establishing connection
 - `disconnected` - Connection lost
-- `error` - Error state
+- `error` - Error state (error field populated)
 
 **Status Codes:**
 - `200 OK` - All components ready
@@ -170,6 +167,30 @@ scrape_configs:
 
 ---
 
+## Status Endpoint
+
+### GET /status
+
+Pipeline message counters — shows how many messages each component has processed since startup.
+
+**Response:**
+```json
+{
+  "pipelines": {
+    "people-counter-pipeline": {
+      "input":           { "name": "people-counter-input", "type": "input",       "count": 1234, "last_time": "..." },
+      "transformations": [{ "name": "people-counter-transform", "type": "transformer", "count": 1200, "last_time": "..." }],
+      "outputs":         [{ "name": "aws-iot-output-people",    "type": "output",      "count": 1198, "last_time": "..." }]
+    }
+  }
+}
+```
+
+**Status Codes:**
+- `200 OK` - Always returns 200 (counts are zero if pipeline has not yet processed any messages)
+
+---
+
 ## Configuration Endpoints
 
 ### POST /config/reload
@@ -205,26 +226,6 @@ Content-Type: application/json
 - `200 OK` - Configuration reloaded successfully
 - `400 Bad Request` - Invalid configuration
 - `500 Internal Server Error` - Reload failed
-
----
-
-### GET /config/status
-
-Get current configuration status.
-
-**Response:**
-```json
-{
-  "active_config": {
-    "inputs": 1,
-    "transformers": 1,
-    "outputs": 1,
-    "pipelines": 1
-  },
-  "last_loaded": "2025-01-28T12:00:00Z",
-  "config_path": "/app/config.yaml"
-}
-```
 
 ---
 

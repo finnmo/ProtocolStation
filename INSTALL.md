@@ -84,17 +84,16 @@ sudo systemctl daemon-reload
 
 Once enabled, the bridge will:
 - ✅ Start automatically on system boot
-- ✅ Restart automatically if it crashes (Restart=always)
-- ✅ Start after Docker is ready
-- ✅ Run health checks every 60s
-- ✅ Auto-recover failed Docker services
+- ✅ Restart automatically if it crashes (Restart=always, RestartSec=5)
+- ✅ Run server health checks every 60s
+- ✅ Auto-recover failed managed servers
 
-## Current Manual Deployment
+## Manual Start (fallback / development)
 
-If you prefer to run it manually (current setup):
+To run without systemd:
 ```bash
 ./start-bridge.sh
 ```
 
-This is working perfectly, but requires you to manually start it after restarts.
+This requires manually restarting after a reboot or crash.
 
