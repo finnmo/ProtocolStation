@@ -1,0 +1,40 @@
+[Unit]
+Description=Protocol Bridge - IoT Message Protocol Bridge
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=all
+User=optech
+Group=optech
+WorkingDirectory=/home/optech/ProtocolBridge
+ExecStart=/home/optech/ProtocolBridge/bridge -config /home/optech/ProtocolBridge/config.yaml
+Restart=always
+RestartSec=5
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Logging - Use file with rotation
+StandardOutput=append:/home/optech/ProtocolBridge/logs/bridge.log
+StandardError=append:/home/optech/ProtocolBridge/logs/bridge.log
+SyslogIdentifier=protocol-bridge
+
+# Environment (for Docker access)
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Graceful shutdown
+TimeoutStopSec=30
+KillMode=mixed
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target
+
+

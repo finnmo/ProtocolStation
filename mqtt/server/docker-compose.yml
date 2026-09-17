@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    container_name: mosquitto-broker
+    restart: unless-stopped
+    ports:
+      - "1883:1883"    # MQTT port
+      - "9001:9001"    # WebSocket port
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - ./mosquitto_data:/mosquitto/data
+      - ./mosquitto_logs:/mosquitto/log
+    networks:
+      - mqtt-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+        compress: "true"
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-h", "localhost", "-t", "$$SYS/#", "-C", "1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+networks:
+  mqtt-network:
+    driver: bridge
+    name: mqtt-network
+
+volumes:
+  mosquitto_data:
+  mosquitto_logs:

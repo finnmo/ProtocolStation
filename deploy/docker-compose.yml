@@ -1,0 +1,80 @@
+version: '3.8'
+
+services:
+  protocol-bridge:
+    build: ..
+    image: protocol-bridge:latest
+    container_name: protocol-bridge
+    restart: unless-stopped
+    
+    volumes:
+      # Configuration
+      - ./config.yaml:/app/config/config.yaml:ro
+      - ./master.key:/app/master.key:ro
+      
+      # Certificates
+      - ../certs:/app/certs:ro
+      
+      # Logs
+      - ./logs:/app/logs
+    
+    environment:
+      - BRIDGE_MASTER_KEY=${BRIDGE_MASTER_KEY:-}
+    
+    ports:
+      - "8080:8080"  # Metrics and health endpoints
+    
+    networks:
+      - bridge-network
+    
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    resources:
+      limits:
+        cpus: '2'
+        memory: 512M
+      reservations:
+        cpus: '0.5'
+        memory: 256M
+    
+    depends_on:
+      - mosquitto
+  
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    container_name: mosquitto-broker
+    restart: unless-stopped
+    
+    volumes:
+      - mosquitto_data:/mosquitto/data
+      - mosquitto_logs:/mosquitto/log
+      - ../mqtt/server/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    
+    ports:
+      - "1883:1883"    # MQTT port
+      - "9001:9001"    # WebSocket port
+    
+    networks:
+      - bridge-network
+    
+    healthcheck:
+      test: mosquitto_sub -h localhost -t test || exit 1
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+networks:
+  bridge-network:
+    driver: bridge
+
+volumes:
+  mosquitto_data:
+  mosquitto_logs:
+
+
