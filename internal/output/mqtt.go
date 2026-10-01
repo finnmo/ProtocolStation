@@ -184,15 +184,12 @@ func (m *MQTTOutput) Send(ctx context.Context, msg *message.Message) error {
 		payload,
 	)
 
-	// Wait for completion with context timeout
-	done := make(chan error, 1)
-	go func() {
-		done <- token.Error()
-	}()
-
+	// Wait for the publish to actually complete (or be acked) before checking
+	// its error - Token.Error() just reads a field with no blocking, so
+	// checking it immediately after Publish() reports false success.
 	select {
-	case err := <-done:
-		if err != nil {
+	case <-token.Done():
+		if err := token.Error(); err != nil {
 			return fmt.Errorf("failed to publish message: %w", err)
 		}
 		m.logger.Debug("message published",

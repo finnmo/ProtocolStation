@@ -297,8 +297,9 @@ func validateTopic(topic string) error {
 		return fmt.Errorf("topic cannot be empty")
 	}
 
-	// Check for valid characters in topic (including & which is used in ONVIF counter topics)
-	matched, err := regexp.MatchString(`^[a-zA-Z0-9/+#_\-&]+$`, topic)
+	// Check for valid characters in topic (including & which is used in ONVIF counter
+	// topics, and : which appears in Axis's native event-to-MQTT topic namespace)
+	matched, err := regexp.MatchString(`^[a-zA-Z0-9/+#_\-&:]+$`, topic)
 	if err != nil {
 		return fmt.Errorf("error validating topic: %v", err)
 	}

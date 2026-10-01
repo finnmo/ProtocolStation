@@ -1,0 +1,133 @@
+# Archived Bosch car-counting pipeline
+#
+# Retired 2026-09-17 when the car park cameras (BEN-TCP1-LZ-Green,
+# BEN-TCP2-LZ-Green) were migrated from Bosch (onvif-ej RuleEngine topics,
+# cumulative counter payload) to Axis (parking/<lot>/<camera>/<direction>
+# topics, trigger-per-crossing payload). See axis-car-counting-* in
+# config.yaml for the replacement.
+#
+# State file for this transformer (state_car-counting-transform.json) was
+# left in place at the repo root and is NOT deleted, so re-enabling this
+# is just a matter of pasting these three blocks back into config.yaml's
+# inputs/transformers/pipelines sections - daily counts will resume from
+# wherever they were left off.
+
+inputs:
+  - name: car-counting-input
+    type: mqtt
+    broker: localhost:1883
+    client_id: bridge-car-counting
+    topics:
+      # Subscribe to BEN-TCP2-Green car counting messages (Inbound/Outbound)
+      - "BEN-TCP2-LZ-Green/onvif-ej/RuleEngine/CountAggregation/Counter/&1/Inbound"
+      - "BEN-TCP2-LZ-Green/onvif-ej/RuleEngine/CountAggregation/Counter/&1/Outbound"
+      - "BEN-TCP1-LZ-Green/onvif-ej/RuleEngine/CountAggregation/Counter/&1/Inbound"
+      - "BEN-TCP1-LZ-Green/onvif-ej/RuleEngine/CountAggregation/Counter/&1/Outbound"
+    qos: 1
+    username: ""
+    password: ""
+
+pipelines:
+  - name: car-counting-pipeline
+    input: car-counting-input
+    routes:
+      - transformer: car-counting-transform
+        outputs:
+          - aws-iot-output-parking
+
+transformers:
+  - name: car-counting-transform
+    type: javascript
+    script: |
+      function transform(input, context) {
+        var topic = context.topic;
+
+        // ── Zone capacity (total spaces per camera/zone) ───────────────────
+        var CAPACITY_MAP = {
+          "BEN-TCP1-LZ-Green": 104,
+          "BEN-TCP2-LZ-Green": 241
+        };
+        // ──────────────────────────────────────────────────────────────────
+
+        if (!topic.includes("onvif-ej/RuleEngine/CountAggregation/Counter")) {
+          return null;
+        }
+
+        var parts = topic.split("/");
+        var cameraName = parts[0];
+        var lastSegment = parts[parts.length - 1];
+        var direction = null;
+
+        if (lastSegment.includes("Inbound")) {
+          direction = "inbound";
+        } else if (lastSegment.includes("Outbound")) {
+          direction = "outbound";
+        } else {
+          return null;
+        }
+
+        var total = CAPACITY_MAP[cameraName];
+        if (total === undefined) {
+          return null;
+        }
+
+        var prefix = cameraName + "_";
+        var currentCount = input.Data && input.Data.Count ? parseInt(input.Data.Count, 10) : 0;
+
+        var today = new Date().toISOString().substring(0, 10);
+        var lastResetDate = state.get(prefix + "lastResetDate") || "";
+        if (lastResetDate !== today) {
+          // Carry-forward: closing occupancy becomes tomorrow's opening baseline
+          // so overnight cars are counted until they actually leave.
+          var prevBase = state.get(prefix + "openingOccupancy") || 0;
+          var prevDailyIn  = Math.max(0, (state.get(prefix + "inbound")  || 0) - (state.get(prefix + "baseInbound")  || 0));
+          var prevDailyOut = Math.max(0, (state.get(prefix + "outbound") || 0) - (state.get(prefix + "baseOutbound") || 0));
+          var closingOccupancy = Math.min(total, Math.max(0, prevBase + prevDailyIn - prevDailyOut));
+          state.setAndSave(prefix + "openingOccupancy", closingOccupancy);
+          state.setAndSave(prefix + "baseInbound",  state.get(prefix + "inbound")  || 0);
+          state.setAndSave(prefix + "baseOutbound", state.get(prefix + "outbound") || 0);
+          state.setAndSave(prefix + "lastResetDate", today);
+        }
+
+        var prevInbound  = state.get(prefix + "inbound")  || 0;
+        var prevOutbound = state.get(prefix + "outbound") || 0;
+
+        if (direction === "inbound") {
+          if (currentCount < prevInbound) {
+            // Counter decreased: camera reboot or integer overflow — adjust base to
+            // preserve the daily count accumulated before the reset.
+            state.setAndSave(prefix + "baseInbound", (state.get(prefix + "baseInbound") || 0) - (prevInbound - currentCount));
+          }
+          state.setAndSave(prefix + "inbound", currentCount);
+        } else {
+          if (currentCount < prevOutbound) {
+            state.setAndSave(prefix + "baseOutbound", (state.get(prefix + "baseOutbound") || 0) - (prevOutbound - currentCount));
+          }
+          state.setAndSave(prefix + "outbound", currentCount);
+        }
+
+        var inbound      = state.get(prefix + "inbound")          || 0;
+        var outbound     = state.get(prefix + "outbound")         || 0;
+        var baseInbound  = state.get(prefix + "baseInbound")      || 0;
+        var baseOutbound = state.get(prefix + "baseOutbound")     || 0;
+        var openingOccupancy = state.get(prefix + "openingOccupancy") || 0;
+        var dailyInbound  = Math.max(0, inbound  - baseInbound);
+        var dailyOutbound = Math.max(0, outbound - baseOutbound);
+        // Occupied = cars present at midnight + today's net movement, clamped to [0, total]
+        var occupied = Math.min(total, Math.max(0, openingOccupancy + dailyInbound - dailyOutbound));
+
+        return {
+          _topic: "pfd/ot/parking/boschcamera/raw",
+          acquisitionTimestamp: input.UtcTime || new Date().toISOString(),
+          iotThingName: cameraName,
+          payloadData: {
+            provider: "MQTT-Bosch",
+            inbound: inbound,
+            outbound: outbound,
+            vacant: Math.max(0, total - occupied),
+            total: total,
+            dailyInbound: dailyInbound,
+            dailyOutbound: dailyOutbound
+          }
+        };
+      }

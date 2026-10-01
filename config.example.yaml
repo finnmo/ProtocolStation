@@ -270,10 +270,12 @@ transformers:
     script: |
       function transform(input) {
         // Gas device reports volume as m3; ModbusOutput expects liters.
+        // liters is a Modbus SINT32 register - round to a whole number or the
+        // Go side rejects it (int32 can't unmarshal a fractional JSON number).
         if (input && input.message && input.message.body && input.message.body.transformedPayload) {
           var m3 = input.message.body.transformedPayload.m3;
           if (m3 !== undefined && m3 !== null) {
-            input.message.body.transformedPayload.liters = m3;
+            input.message.body.transformedPayload.liters = Math.round(m3);
           }
         }
         return input;
