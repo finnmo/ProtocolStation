@@ -42,6 +42,9 @@ type InputConfig struct {
 	CertPath string `yaml:"cert_path"`
 	KeyPath  string `yaml:"key_path"`
 	CAPath   string `yaml:"ca_path"`
+	// Interval-type fields: emits one message per entry in Topics, every
+	// IntervalSeconds, regardless of external activity.
+	IntervalSeconds int `yaml:"interval_seconds"`
 }
 
 // PipelineConfig represents a message pipeline configuration

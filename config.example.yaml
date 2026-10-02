@@ -52,18 +52,41 @@ inputs:
     cert_path: certs/input/aws-iot-ap-southeast-2/certificate.pem.crt
     key_path: certs/input/aws-iot-ap-southeast-2/private.pem.key
     ca_path: certs/input/aws-iot-ap-southeast-2/ca.pem
-  - name: car-counting-input
+  - name: axis-car-counting-input
     type: mqtt
     broker: localhost:1883
-    client_id: bridge-car-counting
+    client_id: bridge-axis-car-counting
     topics:
-      - "BEN-TCP2-LZ-Green/onvif-ej/RuleEngine/CountAggregation/Counter/&1/Inbound"
-      - "BEN-TCP2-LZ-Green/onvif-ej/RuleEngine/CountAggregation/Counter/&1/Outbound"
-      - "BEN-TCP1-LZ-Green/onvif-ej/RuleEngine/CountAggregation/Counter/&1/Inbound"
-      - "BEN-TCP1-LZ-Green/onvif-ej/RuleEngine/CountAggregation/Counter/&1/Outbound"
+      # Axis cameras publish Crossline Counting events via their native
+      # event-to-MQTT bridge (no custom payload template - this is the
+      # camera's own event data verbatim, including a camera-side
+      # cumulative count). Wildcarded so any device/scenario number is
+      # picked up without a config change here.
+      - "axis/+/event/tns:axis/CameraApplicationPlatform/ObjectAnalytics/+"
     qos: 1
     username: ""
     password: ""
+  - name: parking-recalibrate-input
+    type: mqtt
+    broker: localhost:1883
+    client_id: bridge-parking-recalibrate
+    topics:
+      # Manual occupancy correction, e.g. after a physical walk-through
+      # count: parking/recalibrate/<lot>, payload { "occupied": <number> }.
+      - "parking/recalibrate/#"
+    qos: 1
+    username: ""
+    password: ""
+  - name: parking-heartbeat-input
+    type: interval
+    interval_seconds: 15
+    topics:
+      # Crossline counting only sends a message when a car actually
+      # crosses - this ticks every 15s so the transform can check per lot
+      # whether 60s have passed with no real event, and if so republish
+      # the last known numbers as a heartbeat.
+      - "parking/heartbeat/north-lot"
+      - "parking/heartbeat/south-lot"
 
 # Transformation pipelines (1 input -> many outputs)
 pipelines:
@@ -85,10 +108,22 @@ pipelines:
       - transformer: gas-meter-transform
         outputs:
           - gas-meter-modbus-output
-  - name: car-counting-pipeline
-    input: car-counting-input
+  - name: axis-car-counting-pipeline
+    input: axis-car-counting-input
     routes:
-      - transformer: car-counting-transform
+      - transformer: axis-car-counting-transform
+        outputs:
+          - aws-iot-output
+  - name: parking-recalibrate-pipeline
+    input: parking-recalibrate-input
+    routes:
+      - transformer: axis-car-counting-transform
+        outputs:
+          - aws-iot-output
+  - name: parking-heartbeat-pipeline
+    input: parking-heartbeat-input
+    routes:
+      - transformer: axis-car-counting-transform
         outputs:
           - aws-iot-output
 
@@ -175,87 +210,234 @@ transformers:
           PayloadData: payloadData
         };
       }
-  - name: car-counting-transform
+  - name: axis-car-counting-transform
     type: javascript
+    # Axis cameras running "Crossline Counting" (AXIS Object Analytics) and
+    # published via their native event-to-MQTT bridge - not a custom MQTT
+    # Publisher payload template, the camera's own event data verbatim.
+    # One topic/pipeline route per lot's camera(s); this one transformer
+    # handles all three message kinds below, sharing state across them so
+    # occupancy stays consistent regardless of which path produced it.
     script: |
       function transform(input, context) {
-        var topic = context.topic;
-        var OVERFLOW_THRESHOLD = 1000000000;
+        var topic = (context && context.topic) || "";
 
-        // ── Zone capacity (total spaces per camera/zone) ───────────────────
+        // ── Lot capacity (total spaces per parking lot) ───────────────────
+        // A lot can have more than one Axis camera (e.g. separate
+        // entrance/exit lanes) publishing into it - occupancy is tracked
+        // per lot, aggregating every camera mapped to that lot.
         var CAPACITY_MAP = {
-          "BEN-TCP1-LZ-Green": 104,
-          "BEN-TCP2-LZ-Green": 241
+          "north-lot": 100,
+          "south-lot": 200
         };
         // ──────────────────────────────────────────────────────────────────
 
-        if (!topic.includes("onvif-ej/RuleEngine/CountAggregation/Counter")) {
-          return null;
-        }
-
-        var parts = topic.split("/");
-        var cameraName = parts[0];
-        var lastSegment = parts[parts.length - 1];
-        var direction = null;
-
-        if (lastSegment.includes("Inbound")) {
-          direction = "inbound";
-        } else if (lastSegment.includes("Outbound")) {
-          direction = "outbound";
-        } else {
-          return null;
-        }
-
-        var total = CAPACITY_MAP[cameraName];
-        if (total === undefined) {
-          return null;
-        }
-
-        var prefix = cameraName + "_";
-        var currentCount = input.Data && input.Data.Count ? parseInt(input.Data.Count, 10) : 0;
-
-        var today = new Date().toISOString().substring(0, 10);
-        var lastResetDate = state.get(prefix + "lastResetDate") || "";
-        if (lastResetDate !== today) {
-          state.setAndSave(prefix + "baseInbound", state.get(prefix + "inbound") || 0);
-          state.setAndSave(prefix + "baseOutbound", state.get(prefix + "outbound") || 0);
-          state.setAndSave(prefix + "lastResetDate", today);
-        }
-
-        var prevInbound = state.get(prefix + "inbound") || 0;
-        var prevOutbound = state.get(prefix + "outbound") || 0;
-
-        if (direction === "inbound") {
-          if (currentCount < prevInbound && prevInbound > OVERFLOW_THRESHOLD) {
-            state.setAndSave(prefix + "baseInbound", state.get(prefix + "baseInbound") - (prevInbound - currentCount));
-          }
-          state.setAndSave(prefix + "inbound", currentCount);
-        } else {
-          if (currentCount < prevOutbound && prevOutbound > OVERFLOW_THRESHOLD) {
-            state.setAndSave(prefix + "baseOutbound", state.get(prefix + "baseOutbound") - (prevOutbound - currentCount));
-          }
-          state.setAndSave(prefix + "outbound", currentCount);
-        }
-
-        var inbound = state.get(prefix + "inbound") || 0;
-        var outbound = state.get(prefix + "outbound") || 0;
-        var baseInbound = state.get(prefix + "baseInbound") || 0;
-        var baseOutbound = state.get(prefix + "baseOutbound") || 0;
-        var occupied = Math.max(0, inbound - outbound);
-
-        return {
-          _topic: "pfd/ot/parking/bosch5100i/raw",
-          acquisitionTimestamp: input.UtcTime || new Date().toISOString(),
-          iotThingName: cameraName,
-          payloadData: {
-            provider: "MQTT-Bosch",
+        // Shared by the real crossline-event path and the heartbeat path -
+        // both need to compute the same occupied/vacant/daily figures from
+        // whatever is currently in state.
+        function computeOccupancy(prefix, total) {
+          var inbound      = state.get(prefix + "inbound")          || 0;
+          var outbound     = state.get(prefix + "outbound")         || 0;
+          var baseInbound  = state.get(prefix + "baseInbound")      || 0;
+          var baseOutbound = state.get(prefix + "baseOutbound")     || 0;
+          var openingOccupancy = state.get(prefix + "openingOccupancy") || 0;
+          var dailyInbound  = Math.max(0, inbound  - baseInbound);
+          var dailyOutbound = Math.max(0, outbound - baseOutbound);
+          var occupied = Math.min(total, Math.max(0, openingOccupancy + dailyInbound - dailyOutbound));
+          return {
             inbound: inbound,
             outbound: outbound,
             occupied: occupied,
             vacant: Math.max(0, total - occupied),
             total: total,
-            dailyInbound: Math.max(0, inbound - baseInbound),
-            dailyOutbound: Math.max(0, outbound - baseOutbound)
+            dailyInbound: dailyInbound,
+            dailyOutbound: dailyOutbound
+          };
+        }
+
+        // Heartbeat: Crossline Counting only sends a message when a car
+        // actually crosses, so during quiet periods a downstream consumer
+        // could go a long time without hearing from a lot at all. A ticker
+        // publishes to parking/heartbeat/<lot> every 15s (see
+        // parking-heartbeat-input); if 60s have passed since anything was
+        // last actually published for this lot, repeat the last known
+        // numbers so downstream always sees a message at least once a
+        // minute.
+        if (topic.indexOf("parking/heartbeat/") === 0) {
+          var hlot = topic.substring("parking/heartbeat/".length);
+          var htotal = CAPACITY_MAP[hlot];
+          if (htotal === undefined) {
+            return null;
+          }
+          var hprefix = hlot + "_";
+          var lastPublishedAt = state.get(hprefix + "lastPublishedAt") || 0;
+          if (Date.now() - lastPublishedAt < 60000) {
+            return null;
+          }
+
+          var hoccupancy = computeOccupancy(hprefix, htotal);
+          state.setAndSave(hprefix + "lastPublishedAt", Date.now());
+
+          return {
+            _topic: "pfd/ot/parking/axiscamera/raw",
+            acquisitionTimestamp: new Date().toISOString(),
+            iotThingName: hlot,
+            payloadData: {
+              provider: "MQTT-Axis",
+              inbound: hoccupancy.inbound,
+              outbound: hoccupancy.outbound,
+              occupied: hoccupancy.occupied,
+              vacant: hoccupancy.vacant,
+              total: hoccupancy.total,
+              dailyInbound: hoccupancy.dailyInbound,
+              dailyOutbound: hoccupancy.dailyOutbound
+            }
+          };
+        }
+
+        // Manual recalibration: an operator asserting the true current
+        // occupancy (e.g. after a physical walk-through), since there's no
+        // camera-side ground truth available. Publish to
+        // parking/recalibrate/<lot> with payload { "occupied": <number> }.
+        // Rebases the baseline exactly like a daily rollover, just asserted
+        // and triggered on demand instead of by date change - inbound and
+        // outbound crossings from this point measure net movement since the
+        // recalibration, not since midnight.
+        if (topic.indexOf("parking/recalibrate/") === 0) {
+          var rlot = topic.substring("parking/recalibrate/".length);
+          var rtotal = CAPACITY_MAP[rlot];
+          if (rtotal === undefined) {
+            return null;
+          }
+          var asserted = input && input.occupied;
+          if (typeof asserted !== "number" || isNaN(asserted)) {
+            return null;
+          }
+          asserted = Math.min(rtotal, Math.max(0, Math.round(asserted)));
+
+          var rprefix = rlot + "_";
+          state.setAndSave(rprefix + "openingOccupancy", asserted);
+          state.setAndSave(rprefix + "baseInbound",  state.get(rprefix + "inbound")  || 0);
+          state.setAndSave(rprefix + "baseOutbound", state.get(rprefix + "outbound") || 0);
+
+          var rinbound  = state.get(rprefix + "inbound")  || 0;
+          var routbound = state.get(rprefix + "outbound") || 0;
+
+          state.setAndSave(rprefix + "lastPublishedAt", Date.now());
+
+          return {
+            _topic: "pfd/ot/parking/axiscamera/raw",
+            acquisitionTimestamp: new Date().toISOString(),
+            iotThingName: rlot,
+            payloadData: {
+              provider: "MQTT-Axis",
+              inbound: rinbound,
+              outbound: routbound,
+              occupied: asserted,
+              vacant: Math.max(0, rtotal - asserted),
+              total: rtotal,
+              dailyInbound: 0,
+              dailyOutbound: 0
+            }
+          };
+        }
+
+        // Native Axis event-to-MQTT bridge payload for a Crossline Counting
+        // scenario - verbatim camera event data, e.g.:
+        // { message: { data: { scenarioType: "CrosslineCounting",
+        //     scenario: "CAM2-Inbound", total: "1", totalCar: "1",
+        //     totalTruck: "0", totalBus: "0", resetTime: "..." } } }
+        if (!input || !input.message || !input.message.data) {
+          return null;
+        }
+        var data = input.message.data;
+        if (data.scenarioType !== "CrosslineCounting") {
+          return null;
+        }
+
+        // scenario name is "<camera>-<direction>", e.g. "CAM2-Inbound"
+        var scenarioParts = (data.scenario || "").split("-");
+        if (scenarioParts.length !== 2) {
+          return null;
+        }
+        var camShort = scenarioParts[0];
+        var direction = scenarioParts[1].toLowerCase();
+        if (direction !== "inbound" && direction !== "outbound") {
+          return null;
+        }
+
+        // Camera short-name -> parking lot.
+        var LOT_MAP = {
+          "CAM1": "north-lot",
+          "CAM2": "south-lot"
+        };
+
+        var lot = LOT_MAP[camShort];
+        if (!lot) {
+          return null;
+        }
+        var total = CAPACITY_MAP[lot];
+        if (total === undefined) {
+          return null;
+        }
+
+        var prefix = lot + "_";
+        var dirPrefix = prefix + direction + "_";
+
+        // The camera reports its own cumulative count per direction
+        // (data.total, summed across vehicle classes), and resets it
+        // occasionally (data.resetTime marks when). Fold each reset's final
+        // value into an accumulator so our running total never drops - this
+        // also makes duplicate delivery (QoS 1 redelivery) a no-op instead of
+        // a double count, since we're reading a value, not incrementing one.
+        var camTotal = parseInt(data.total, 10) || 0;
+        var resetTime = data.resetTime || "";
+        var lastResetTime = state.get(dirPrefix + "lastResetTime") || "";
+        var accum = state.get(dirPrefix + "accum") || 0;
+
+        if (lastResetTime !== "" && resetTime !== lastResetTime) {
+          var lastCamTotal = state.get(dirPrefix + "lastCamTotal") || 0;
+          accum += lastCamTotal;
+          state.setAndSave(dirPrefix + "accum", accum);
+        }
+        state.setAndSave(dirPrefix + "lastResetTime", resetTime);
+        state.setAndSave(dirPrefix + "lastCamTotal", camTotal);
+
+        var runningTotal = accum + camTotal;
+
+        var today = new Date().toISOString().substring(0, 10);
+        var lastResetDate = state.get(prefix + "lastResetDate") || "";
+        if (lastResetDate !== today) {
+          // Carry-forward: closing occupancy becomes tomorrow's opening baseline
+          // so overnight cars are counted until they actually leave.
+          var prevBase = state.get(prefix + "openingOccupancy") || 0;
+          var prevDailyIn  = Math.max(0, (state.get(prefix + "inbound")  || 0) - (state.get(prefix + "baseInbound")  || 0));
+          var prevDailyOut = Math.max(0, (state.get(prefix + "outbound") || 0) - (state.get(prefix + "baseOutbound") || 0));
+          var closingOccupancy = Math.min(total, Math.max(0, prevBase + prevDailyIn - prevDailyOut));
+          state.setAndSave(prefix + "openingOccupancy", closingOccupancy);
+          state.setAndSave(prefix + "baseInbound",  state.get(prefix + "inbound")  || 0);
+          state.setAndSave(prefix + "baseOutbound", state.get(prefix + "outbound") || 0);
+          state.setAndSave(prefix + "lastResetDate", today);
+        }
+
+        state.setAndSave(prefix + direction, runningTotal);
+
+        var occupancy = computeOccupancy(prefix, total);
+        state.setAndSave(prefix + "lastPublishedAt", Date.now());
+
+        return {
+          _topic: "pfd/ot/parking/axiscamera/raw",
+          acquisitionTimestamp: new Date().toISOString(),
+          iotThingName: lot,
+          payloadData: {
+            provider: "MQTT-Axis",
+            inbound: occupancy.inbound,
+            outbound: occupancy.outbound,
+            occupied: occupancy.occupied,
+            vacant: occupancy.vacant,
+            total: occupancy.total,
+            dailyInbound: occupancy.dailyInbound,
+            dailyOutbound: occupancy.dailyOutbound
           }
         };
       }

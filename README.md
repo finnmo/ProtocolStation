@@ -7,6 +7,7 @@ Think of it as a central station: messages arrive from different "lines" (inputs
 ## Highlights
 
 - **MQTT input/output** with auto-reconnect (subscriptions restored on reconnect)
+- **Interval input** emits synthetic messages on a fixed timer, independent of any external activity — drives time-based transform logic (e.g. a heartbeat) in an otherwise purely reactive pipeline
 - **Modbus TCP server** on port 502 by default, 32-bit SINT values stored big‑endian across 2 holding registers
 - **JavaScript transformers** for payload shaping, with persistent state across messages
 - **1→N routing**, retries, DLQ, circuit breaker, and hosted server management
@@ -169,7 +170,7 @@ pipelines:
 
 ### Components
 
-- **Input**: MQTT client that subscribes to topics and forwards messages
+- **Input**: MQTT client that subscribes to topics and forwards messages, or an interval timer that emits synthetic messages on a fixed schedule
 - **Transformer**: JavaScript runtime for message transformation
 - **Output**: MQTT or Modbus
 - **Pipeline**: Orchestrates message flow through the system
@@ -283,7 +284,7 @@ mbpoll -m tcp -a 5 -r 3020 -c 2 127.0.0.1 502
 ├── internal/
 │   ├── config/          # Configuration parsing and validation
 │   ├── health/          # Health/readiness checks, disk space monitor
-│   ├── input/           # Input implementations (MQTT)
+│   ├── input/           # Input implementations (MQTT, interval timer)
 │   ├── logging/         # Structured logger setup with rotation
 │   ├── metrics/         # Prometheus metrics
 │   ├── output/          # Output implementations (MQTT, Modbus)

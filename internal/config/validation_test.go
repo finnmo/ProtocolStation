@@ -82,6 +82,7 @@ func TestValidateTopic(t *testing.T) {
 		{"valid with wildcard", "sensors/+", false},
 		{"valid multi-level", "sensors/#", false},
 		{"valid at end only", "sensors/#", false},
+		{"valid with colon (Axis native event namespace)", "axis/TCP1/event/tns:axis/CameraApplicationPlatform/ObjectAnalytics/Device1Scenario1", false},
 		{"empty topic", "", true},
 		{"invalid # in middle", "sensors/#/temperature", true},
 		{"invalid characters", "sensors/temp@123", true},

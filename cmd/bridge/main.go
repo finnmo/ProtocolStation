@@ -102,6 +102,9 @@ func main() {
 		case "mqtt":
 			in := input.NewMQTTInput(inputCfg, logger)
 			inputs[inputCfg.Name] = in
+		case "interval":
+			in := input.NewIntervalInput(inputCfg, logger)
+			inputs[inputCfg.Name] = in
 		default:
 			logger.Error("unsupported input type", zap.String("type", inputCfg.Type))
 			os.Exit(1)
